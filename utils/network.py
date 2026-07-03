@@ -36,7 +36,7 @@ def create_robust_session() -> requests.Session:
         {
             "User-Agent": (
                 "MSM/6.0 "
-                "(+https://github.com/sahaj33-op/MSM-minecraft-server-manager-termux)"
+                "(+https://github.com/sizwinz/MSM-minecraft-server-manager-termux)"
             ),
             "Accept": "application/json",
         }

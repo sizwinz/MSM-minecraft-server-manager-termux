@@ -14,7 +14,7 @@ log_success() { echo -e "${C_BOLD}${C_GREEN}[SUCCESS]${C_RESET} $*"; }
 log_warning() { echo -e "${C_BOLD}${C_YELLOW}[WARNING]${C_RESET} $*"; }
 log_error() { echo -e "${C_BOLD}${C_RED}[ERROR]${C_RESET} $*"; }
 
-REPO_URL="https://github.com/sahaj33-op/MSM-minecraft-server-manager-termux.git"
+REPO_URL="https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git"
 REPO_DIR="MSM-minecraft-server-manager-termux"
 DRY_RUN="${MSM_INSTALL_DRY_RUN:-0}"
 TARGET_HOME="${HOME}"

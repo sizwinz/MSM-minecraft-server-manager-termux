@@ -8,7 +8,7 @@ Multi-server. Persistent SQLite tracking. Zero-GUI workflow.
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Termux%20%7C%20Linux-orange?logo=android)](https://termux.dev)
-[![Stars](https://img.shields.io/github/stars/Sahaj33-op/MSM-minecraft-server-manager-termux?style=flat&color=yellow)](https://github.com/Sahaj33-op/MSM-minecraft-server-manager-termux/stargazers)
+[![Stars](https://img.shields.io/github/stars/sizwinz/MSM-minecraft-server-manager-termux?style=flat&color=yellow)](https://github.com/sizwinz/MSM-minecraft-server-manager-termux/stargazers)
 
 </div>
 
@@ -130,7 +130,7 @@ The installer automates Java 17 and 21 where packages are available. Java 8 is n
 ### Quick Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sahaj33-op/MSM-minecraft-server-manager-termux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sizwinz/MSM-minecraft-server-manager-termux/main/install.sh | bash
 ```
 
 The installer supports Termux and Debian/Ubuntu/WSL. It:
@@ -169,7 +169,7 @@ python msm.py
 pkg update && pkg upgrade -y
 pkg install -y python git screen openjdk-17 openjdk-21 php python-psutil tur-repo playit
 
-git clone https://github.com/sahaj33-op/MSM-minecraft-server-manager-termux.git
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
 cd MSM-minecraft-server-manager-termux
 
 python -m venv --system-site-packages .venv
@@ -200,7 +200,7 @@ sudo apt-get install -y playit
 Then install MSM as your normal user:
 
 ```bash
-git clone https://github.com/sahaj33-op/MSM-minecraft-server-manager-termux.git
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
 cd MSM-minecraft-server-manager-termux
 
 python3 -m venv .venv
