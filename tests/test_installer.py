@@ -102,8 +102,6 @@ def test_debian_install_uses_sudo_only_for_system_packages(tmp_path: Path) -> No
         "git",
         "python3",
         "chmod",
-        "uname",
-        "seq",
     ):
         _write_stub(fake_bin, command)
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
