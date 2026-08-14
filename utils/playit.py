@@ -124,7 +124,71 @@ def inspect_playit_status(server_dir: Path) -> TunnelStatus:
     endpoint = extract_playit_public_endpoint(log_tail) if log_tail else None
     claim_url = extract_playit_claim_url(log_tail) if log_tail else None
 
-    if endpoint:
+    if not endpoint:
+        endpoint = get_saved_playit_endpoint(server_dir)
+
+    if not endpoint and running and (server_dir / ".msm.playit.secret").exists():
+        secret = read_text_file(server_dir / ".msm.playit.secret")
+        if secret:
+            try:
+                from utils.playit_api import (
+                    PlayitApiClient,
+                    extract_tunnel_endpoint,
+                )
+
+                client = PlayitApiClient(agent_secret=secret, timeout=4)
+                try:
+                    rundata = client.agent_rundata()
+                    if isinstance(rundata, dict):
+                        for t in rundata.get("tunnels") or []:
+                            ep = extract_tunnel_endpoint(t)
+                            if ep:
+                                endpoint = ep
+                                save_playit_endpoint(server_dir, endpoint)
+                                break
+                except Exception:
+                    pass
+
+                if not endpoint:
+                    try:
+                        v1_rundata = client.v1_agents_rundata()
+                        if isinstance(v1_rundata, dict):
+                            for t in v1_rundata.get("tunnels") or []:
+                                ep = extract_tunnel_endpoint(t)
+                                if ep:
+                                    endpoint = ep
+                                    save_playit_endpoint(server_dir, endpoint)
+                                    break
+                    except Exception:
+                        pass
+
+                if not endpoint:
+                    try:
+                        tunnels = client.tunnels_list()
+                        for t in tunnels:
+                            ep = extract_tunnel_endpoint(t)
+                            if ep:
+                                endpoint = ep
+                                save_playit_endpoint(server_dir, endpoint)
+                                break
+                    except Exception:
+                        pass
+
+                if not endpoint:
+                    try:
+                        v1_tunnels = client.v1_tunnels_list()
+                        for t in v1_tunnels:
+                            ep = extract_tunnel_endpoint(t)
+                            if ep:
+                                endpoint = ep
+                                save_playit_endpoint(server_dir, endpoint)
+                                break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    if endpoint and running:
         save_playit_endpoint(server_dir, endpoint)
         return TunnelStatus(
             provider="playit",
@@ -133,6 +197,13 @@ def inspect_playit_status(server_dir: Path) -> TunnelStatus:
             endpoint=endpoint,
             claim_url=claim_url,
             pid=pid,
+        )
+    if endpoint:
+        return TunnelStatus(
+            provider="playit",
+            state=TUNNEL_STATUS_NOT_RUNNING,
+            message=f"Not running (last endpoint: {endpoint})",
+            endpoint=endpoint,
         )
     if claim_url and running:
         return TunnelStatus(
@@ -151,14 +222,6 @@ def inspect_playit_status(server_dir: Path) -> TunnelStatus:
                 "run the tunnel setup wizard to create or update the mapping"
             ),
             pid=pid,
-        )
-    saved = get_saved_playit_endpoint(server_dir)
-    if saved:
-        return TunnelStatus(
-            provider="playit",
-            state=TUNNEL_STATUS_NOT_RUNNING,
-            message=f"Not running (last endpoint: {saved})",
-            endpoint=saved,
         )
     return TunnelStatus(
         provider="playit",

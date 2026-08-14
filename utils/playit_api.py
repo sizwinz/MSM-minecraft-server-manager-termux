@@ -176,27 +176,63 @@ def build_tunnel_update_request(
 
 
 def extract_tunnel_endpoint(tunnel: dict[str, Any]) -> str | None:
+    # 1. Check custom domain or assigned domain (AgentTunnel schema)
+    for field in ("custom_domain", "assigned_domain", "display_address"):
+        val = tunnel.get(field)
+        if isinstance(val, str) and val.strip():
+            port_info = tunnel.get("port")
+            if isinstance(port_info, dict) and port_info.get("from"):
+                p = port_info.get("from")
+                if ":" not in val:
+                    return f"{val.strip()}:{p}"
+            return val.strip()
+
+    # 2. Check allocation (AccountTunnel / TunnelAllocated schema)
     allocation = tunnel.get("alloc")
-    if isinstance(allocation, dict) and allocation.get("status") == "allocated":
+    if isinstance(allocation, dict):
         data = allocation.get("data") or {}
-        domain = data.get("assigned_domain") or data.get("ip_hostname")
+        domain = (
+            data.get("assigned_domain")
+            or data.get("assigned_srv")
+            or data.get("ip_hostname")
+        )
         port = data.get("port_start")
         if domain and port:
             return f"{domain}:{port}"
         if domain:
             return str(domain)
 
+    # 3. Check connect_addresses (AccountTunnelV1 schema)
     for address in tunnel.get("connect_addresses") or []:
-        value = address.get("value") if isinstance(address, dict) else None
-        if isinstance(value, dict):
-            endpoint = value.get("address")
-            default_port = value.get("default_port")
-            if endpoint and default_port and ":" not in str(endpoint):
-                return f"{endpoint}:{default_port}"
-            if endpoint:
-                return str(endpoint)
-        elif isinstance(value, str):
-            return value
+        if isinstance(address, dict):
+            value = address.get("value")
+            if isinstance(value, dict):
+                ep = value.get("domain") or value.get("address")
+                default_port = value.get("default_port")
+                if ep and default_port and ":" not in str(ep):
+                    return f"{ep}:{default_port}"
+                if ep:
+                    return str(ep)
+            elif isinstance(value, str):
+                return value
+
+    # 4. Check public_allocations (AccountTunnelV1 schema)
+    for pub in tunnel.get("public_allocations") or []:
+        if isinstance(pub, dict):
+            details = pub.get("details") or {}
+            if isinstance(details, dict):
+                auto_dom = details.get("auto_domain") or details.get("ip_hostname")
+                p = details.get("port")
+                if auto_dom and p:
+                    return f"{auto_dom}:{p}"
+                if auto_dom:
+                    return str(auto_dom)
+
+    for field in ("domain", "ip_hostname", "public_address"):
+        val = tunnel.get(field)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
     return None
 
 
@@ -210,7 +246,9 @@ def _matches_tunnel(
     if tunnel_id and tunnel.get("id") == tunnel_id:
         return True
     origin = tunnel.get("origin") or {}
-    origin_data = origin.get("data") if isinstance(origin, dict) else {}
+    origin_data = (
+        origin.get("data") or origin.get("details") if isinstance(origin, dict) else {}
+    )
     return (
         tunnel.get("name") == name
         and isinstance(origin_data, dict)
@@ -219,7 +257,7 @@ def _matches_tunnel(
 
 
 class PlayitApiClient:
-    """Small wrapper around the unstable Playit account API."""
+    """Small wrapper around the Playit account API."""
 
     def __init__(
         self,
@@ -264,10 +302,31 @@ class PlayitApiClient:
             raise PlayitApiError("Playit returned invalid agent run data.")
         return data
 
+    def v1_agents_rundata(self) -> dict[str, Any]:
+        data = self._call("/v1/agents/rundata", {})
+        if not isinstance(data, dict):
+            raise PlayitApiError("Playit returned invalid v1 agent run data.")
+        return data
+
+    def v1_tunnels_list(self) -> list[dict[str, Any]]:
+        data = self._call("/v1/tunnels/list", {})
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            tunnels = data.get("tunnels")
+            if isinstance(tunnels, list):
+                return tunnels
+        return []
+
     def tunnels_list(self, agent_id: str | None = None) -> list[dict[str, Any]]:
         data = self._call("/tunnels/list", {"tunnel_id": None, "agent_id": agent_id})
-        tunnels = data.get("tunnels") if isinstance(data, dict) else None
-        return tunnels if isinstance(tunnels, list) else []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            tunnels = data.get("tunnels")
+            if isinstance(tunnels, list):
+                return tunnels
+        return []
 
     def create_or_update_tunnel(
         self,
