@@ -495,6 +495,27 @@ def playit_setup_wizard(
                 resolved_binary = resolve_playit_binary(custom_input)
                 binary_path = resolved_binary or custom_input
 
+    if resolved_binary:
+        if instance.playit_secret_file.exists():
+            print(
+                f" {C.GREEN}✓{C.RESET} Existing Playit credentials found on this server."
+            )
+            relink = (
+                input(
+                    f" {C.BOLD}Do you want to re-link a fresh Playit agent? (y/N): {C.RESET}"
+                )
+                .strip()
+                .lower()
+            )
+            if relink == "y":
+                instance.stop_tunnel()
+                remove_file(instance.playit_secret_file)
+                remove_file(instance.playit_endpoint_file)
+                remove_file(instance.server_dir / ".msm.playit.log")
+                logger.log(
+                    "INFO", "Cleared previous agent secret. Starting fresh linking..."
+                )
+
     if resolved_binary and not instance.playit_secret_file.exists():
         secret_file = instance.playit_secret_file
         socket_file = instance.server_dir / ".msm.playit.sock"
@@ -742,13 +763,14 @@ def tunnel_manager_menu(
         print(" [ 4] Setup Ngrok")
         print(" [ 5] Test & Diagnose Tunnel Health")
         print(" [ 6] Advanced Tunnel Settings (Host, Port, Protocol, Binary)")
+        print(" [ 7] Reset / Re-link Agent (Delete Stored Secrets)")
         if enabled:
-            print(" [ 7] Disable Tunnel")
+            print(" [ 8] Disable Tunnel")
         else:
-            print(" [ 7] Enable Tunnel")
+            print(" [ 8] Enable Tunnel")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-7]: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose action [0-8]: {C.RESET}").strip()
         if choice == "0":
             return
         if choice == "1":
@@ -775,9 +797,30 @@ def tunnel_manager_menu(
             configure_tunnel_advanced(runtime, config_manager, current_server, logger)
             continue
         if choice == "7":
+            confirm = (
+                input(
+                    f"\n{C.YELLOW}Reset tunnel agent and delete saved credentials for {current_server}? (y/N): {C.RESET}"
+                )
+                .strip()
+                .lower()
+            )
+            if confirm == "y":
+                instance.stop_tunnel()
+                remove_file(instance.playit_secret_file)
+                remove_file(instance.playit_endpoint_file)
+                remove_file(instance.server_dir / ".msm.ngrok.endpoint")
+                remove_file(instance.server_dir / ".msm.playit.log")
+                remove_file(instance.server_dir / ".msm.ngrok.log")
+                logger.log(
+                    "SUCCESS",
+                    f"Reset tunnel credentials and state for {current_server}.",
+                )
+            pause()
+            continue
+        if choice == "8":
             binary_path = tunnel.get(
                 "binary_path",
-                DEFAULT_TUNNEL_BINARIES.get(provider, "playit-cli"),
+                DEFAULT_TUNNEL_BINARIES.get(provider, "playit"),
             )
             save_tunnel_config(
                 instance,
