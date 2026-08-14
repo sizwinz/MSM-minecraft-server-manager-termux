@@ -36,7 +36,7 @@ def _working_bash() -> str:
 
 def _write_stub(bin_dir: Path, name: str, body: str = "") -> None:
     path = bin_dir / name
-    script = "#!/usr/bin/env sh\n" + (body or "exit 0\n")
+    script = "#!/bin/sh\n" + (body or "exit 0\n")
     path.write_text(script, encoding="utf-8")
     path.chmod(0o755)
 
@@ -48,13 +48,13 @@ def _run_installer(
 ) -> subprocess.CompletedProcess[str]:
     bash = _working_bash()
     install_dir = tmp_path / "MSM-minecraft-server-manager-termux"
-    install_dir.mkdir()
+    install_dir.mkdir(exist_ok=True)
     (install_dir / "msm.py").write_text("", encoding="utf-8")
     (install_dir / "requirements.txt").write_text("", encoding="utf-8")
     env = {
         **os.environ,
         "HOME": str(tmp_path),
-        "PATH": str(fake_bin),
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
         "MSM_INSTALL_DRY_RUN": "1",
         "MSM_INSTALL_DIR": str(install_dir),
         **extra_env,
@@ -102,6 +102,8 @@ def test_debian_install_uses_sudo_only_for_system_packages(tmp_path: Path) -> No
         "git",
         "python3",
         "chmod",
+        "uname",
+        "seq",
     ):
         _write_stub(fake_bin, command)
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
@@ -121,7 +123,6 @@ def test_debian_install_uses_sudo_only_for_system_packages(tmp_path: Path) -> No
 
 
 def test_installer_reuses_current_checkout(tmp_path: Path) -> None:
-    bash = _working_bash()
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     for command in ("pkg", "git", "python", "chmod"):
@@ -129,21 +130,9 @@ def test_installer_reuses_current_checkout(tmp_path: Path) -> None:
     _write_stub(fake_bin, "id", "printf '10070\\n'\n")
     (tmp_path / "msm.py").write_text("", encoding="utf-8")
     (tmp_path / "requirements.txt").write_text("", encoding="utf-8")
-    env = {
-        **os.environ,
-        "HOME": str(tmp_path),
-        "PATH": str(fake_bin),
-        "PREFIX": "/data/data/com.termux/files/usr",
-        "MSM_INSTALL_DRY_RUN": "1",
-    }
 
-    result = subprocess.run(
-        [bash, str(INSTALLER)],
-        cwd=tmp_path,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
+    result = _run_installer(
+        tmp_path, fake_bin, {"PREFIX": "/data/data/com.termux/files/usr"}
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
@@ -154,9 +143,15 @@ def test_installer_reuses_current_checkout(tmp_path: Path) -> None:
 def test_unsupported_platform_fails_with_clear_message(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
+    for command in ("id", "sh", "seq", "uname"):
+        _write_stub(fake_bin, command)
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": ""})
+    result = _run_installer(
+        tmp_path,
+        fake_bin,
+        {"PREFIX": "", "PATH": str(fake_bin)},
+    )
 
     assert result.returncode != 0
     assert "Only Termux and Debian/Ubuntu/WSL are supported" in result.stdout
