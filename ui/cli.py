@@ -36,6 +36,7 @@ from utils.playit_api import (
     PLAYIT_THIRD_PARTY_AUTH_URL,
     PlayitApiClient,
     PlayitApiError,
+    auto_provision_playit_tunnel,
     load_playit_session,
     save_playit_session,
 )
@@ -633,7 +634,7 @@ def playit_setup_wizard(
                 )
 
             step = input(
-                "\nPress Enter after approving in browser (or 's' to skip): "
+                "\nOpen the URL, press Enter and accept the agent in the website (or 's' to skip): "
             ).strip()
             if step.lower() != "s":
                 if claim_code:
@@ -679,6 +680,26 @@ def playit_setup_wizard(
                         "SUCCESS",
                         f"Stored playit secret for {current_server}.",
                     )
+                    sec_token = read_text_file(secret_file)
+                    if sec_token:
+                        cfg = config_manager.load()
+                        srv_cfg = cfg.get("servers", {}).get(current_server, {})
+                        srv_flavor = srv_cfg.get("server_flavor")
+                        srv_port = int(
+                            srv_cfg.get("server_settings", {}).get("port", 25565)
+                        )
+                        _tid, ep = auto_provision_playit_tunnel(
+                            current_server,
+                            sec_token,
+                            flavor=srv_flavor,
+                            local_port=srv_port,
+                        )
+                        if ep:
+                            write_text_file(instance.playit_endpoint_file, ep)
+                            logger.log(
+                                "SUCCESS",
+                                f"Created Playit tunnel for {current_server}: {ep}",
+                            )
                 else:
                     logger.log(
                         "ERROR",

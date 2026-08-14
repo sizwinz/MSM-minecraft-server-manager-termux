@@ -77,7 +77,7 @@ def test_agent_rundata_uses_agent_secret_auth() -> None:
     data = client.agent_rundata()
 
     assert data["agent_id"] == "agent-id"
-    assert session.calls[0][3]["Authorization"] == "agent-secret"
+    assert session.calls[0][3]["Authorization"] == "Agent-Secret agent-secret"
 
 
 def test_build_tunnel_create_request_for_java_tcp() -> None:

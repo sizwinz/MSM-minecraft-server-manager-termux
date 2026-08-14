@@ -6,14 +6,13 @@ import re
 from pathlib import Path
 
 PLAYIT_TUNNEL_ADDRESS_PATTERN = re.compile(
-    r"tunnel_address=(?P<endpoint>[^\s,]+)",
+    r"(?:tunnel_address|tunnel_addr|public_address|public_endpoint)=(?P<endpoint>[^\s,]+)",
     re.IGNORECASE,
 )
 PLAYIT_ENDPOINT_PATTERN = re.compile(
     (
         r"\b(?P<endpoint>"
         r"(?:[a-z0-9-]+\.)+(?:playit\.gg|ply\.gg|joinmc\.link)(?::\d+)?"
-        r"|(?:\d{1,3}\.){3}\d{1,3}:\d+"
         r")\b"
     ),
     re.IGNORECASE,

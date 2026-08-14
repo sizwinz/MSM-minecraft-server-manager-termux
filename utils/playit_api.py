@@ -72,7 +72,43 @@ def _account_headers(session_key: str | None) -> dict[str, str]:
 
 
 def _agent_headers(agent_secret: str | None) -> dict[str, str]:
-    return {"Authorization": agent_secret} if agent_secret else {}
+    if not agent_secret:
+        return {}
+    token = agent_secret.strip()
+    if not token.startswith("Agent-Secret ") and not token.startswith("Session "):
+        token = f"Agent-Secret {token}"
+    return {"Authorization": token}
+
+
+def auto_provision_playit_tunnel(
+    server_name: str,
+    secret_key: str,
+    flavor: str | None = None,
+    protocol: str | None = "tcp",
+    local_host: str = "127.0.0.1",
+    local_port: int | str = 25565,
+) -> tuple[str | None, str | None]:
+    """Create or fetch tunnel for agent using agent_secret key."""
+    try:
+        client = PlayitApiClient(agent_secret=secret_key)
+        rundata = client.agent_rundata()
+        agent_id = (
+            rundata.get("agent_id")
+            or rundata.get("id")
+            or (rundata.get("agent") or {}).get("id")
+        )
+        if not agent_id:
+            return None, None
+        return client.create_or_update_tunnel(
+            server_name=server_name,
+            agent_id=str(agent_id),
+            flavor=flavor,
+            protocol=protocol,
+            local_host=local_host,
+            local_port=local_port,
+        )
+    except Exception:
+        return None, None
 
 
 def _coerce_port(value: int | str | None) -> int:
