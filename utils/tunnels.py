@@ -102,7 +102,7 @@ def build_playit_start_command(
     command = [str(binary_path)]
     if secret_path:
         command.extend(["--secret-path", str(secret_path)])
-    if socket_path and bin_name == "playitd":
+    if socket_path and bin_name in ("playit", "playitd"):
         command.extend(["--socket-path", str(socket_path)])
     return command
 

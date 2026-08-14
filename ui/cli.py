@@ -637,7 +637,7 @@ def playit_setup_wizard(
             ).strip()
             if step.lower() != "s":
                 if claim_code:
-                    run_command(
+                    exchange_res = run_command(
                         build_playit_claim_exchange_command(
                             cli_binary,
                             claim_code,
@@ -649,6 +649,26 @@ def playit_setup_wizard(
                         capture_output=True,
                         cwd=instance.server_dir,
                     )
+                    if exchange_res:
+                        out = (
+                            f"{exchange_res.stdout or ''}\n"
+                            f"{exchange_res.stderr or ''}"
+                        ).strip()
+                        for line in out.splitlines():
+                            line_str = line.strip()
+                            if "secret" in line_str.lower() and ":" in line_str:
+                                sec_val = line_str.split(":", 1)[1].strip()
+                                if sec_val and not sec_val.startswith("{"):
+                                    write_text_file(secret_file, sec_val)
+                                    break
+                            elif (
+                                len(line_str) in (32, 64)
+                                and not line_str.startswith("Error")
+                                and not line_str.startswith("error")
+                            ):
+                                write_text_file(secret_file, line_str)
+                                break
+
                 for _ in range(10):
                     if secret_file.exists() and secret_file.stat().st_size > 0:
                         break
