@@ -12,7 +12,7 @@ PLAYIT_TUNNEL_ADDRESS_PATTERN = re.compile(
 PLAYIT_ENDPOINT_PATTERN = re.compile(
     (
         r"\b(?P<endpoint>"
-        r"(?:[a-z0-9-]+\.)+(?:playit\.gg|ply\.gg)(?::\d+)?"
+        r"(?:[a-z0-9-]+\.)+(?:playit\.gg|ply\.gg|joinmc\.link)(?::\d+)?"
         r"|(?:\d{1,3}\.){3}\d{1,3}:\d+"
         r")\b"
     ),

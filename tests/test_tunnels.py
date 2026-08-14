@@ -75,6 +75,15 @@ def test_extract_playit_public_endpoint_from_hostname_log():
     assert extract_playit_public_endpoint(log_text) == "fancy-world.ply.gg:30123"
 
 
+def test_extract_playit_public_endpoint_from_joinmc_log():
+    log_text = """
+    INFO tunnel active
+    INFO custom domain diamond-craft.gl.joinmc.link
+    """
+
+    assert extract_playit_public_endpoint(log_text) == "diamond-craft.gl.joinmc.link"
+
+
 def test_extract_playit_claim_url_from_log():
     log_text = """
     INFO visit https://playit.gg/claim/some-agent-token to link this device
