@@ -615,21 +615,6 @@ def playit_setup_wizard(
                 daemon.kill()
             log_handle.close()
 
-    if read_text_file(instance.playit_secret_file):
-        auto_map = (
-            input("\nConfigure Playit tunnel endpoint for this server now? (Y/n): ")
-            .strip()
-            .lower()
-            != "n"
-        )
-        if auto_map:
-            configure_playit_api_tunnel(
-                instance,
-                config_manager,
-                current_server,
-                logger,
-            )
-
     save_tunnel_config(
         instance,
         config_manager,
