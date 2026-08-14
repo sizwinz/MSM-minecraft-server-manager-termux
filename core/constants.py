@@ -51,7 +51,7 @@ SUPPORTED_TUNNEL_PROVIDERS = ("ngrok", "playit")
 SUPPORTED_TUNNEL_PROTOCOLS = ("tcp", "udp")
 DEFAULT_TUNNEL_BINARIES = {
     "ngrok": "ngrok",
-    "playit": "playit-cli",
+    "playit": "playit",
 }
 
 PLAYIT_ENDPOINT_FILE_NAME = ".msm.playit.endpoint"

@@ -42,11 +42,23 @@ from utils.tunnels import (
 
 
 def resolve_playit_binary(binary_path: str | None = None) -> str | None:
-    """Return the first usable playit binary, prioritizing playitd."""
-    candidates: list[str] = ["playit"]
+    """Return the first usable playit daemon binary, prioritizing playit and playitd."""
+    candidates: list[str] = []
     if binary_path:
+        # If binary_path points to playit-cli, check for sibling playit / playitd daemon
+        if Path(binary_path).name == "playit-cli":
+            cli_parent = Path(binary_path).parent
+            if (cli_parent / "playit").exists():
+                candidates.append(str(cli_parent / "playit"))
+            if (cli_parent / "playitd").exists():
+                candidates.append(str(cli_parent / "playitd"))
+        else:
+            candidates.append(binary_path)
+
+    candidates.extend(["playit", "playitd"])
+
+    if binary_path and Path(binary_path).name == "playit-cli":
         candidates.append(binary_path)
-    candidates.extend(["playit-cli", "playitd"])
 
     # Remove duplicates while preserving order
     unique_candidates = []
