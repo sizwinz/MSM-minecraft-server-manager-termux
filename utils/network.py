@@ -480,11 +480,18 @@ def get_ngrok_public_url(
         )
         if not response:
             return None
-        for tunnel in response.json().get("tunnels", []):
-            address = tunnel.get("config", {}).get("addr", "")
-            if address.endswith(f":{port}") or address.endswith(str(port)):
+        tunnels = response.json().get("tunnels", [])
+        if not tunnels:
+            return None
+        port_str = str(port)
+        for tunnel in tunnels:
+            address = str(tunnel.get("config", {}).get("addr", ""))
+            if port_str in address or address.endswith(f":{port}"):
                 return tunnel.get("public_url")
-        return None
+        for tunnel in tunnels:
+            if tunnel.get("proto") == "tcp" and tunnel.get("public_url"):
+                return tunnel.get("public_url")
+        return tunnels[0].get("public_url")
     finally:
         session.close()
 

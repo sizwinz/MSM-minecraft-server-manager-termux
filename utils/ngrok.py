@@ -110,10 +110,26 @@ def inspect_ngrok_status(
                 endpoint=endpoint,
                 pid=pid,
             )
+        saved = get_saved_ngrok_endpoint(server_dir)
+        if saved:
+            return TunnelStatus(
+                provider="ngrok",
+                state=TUNNEL_STATUS_READY,
+                message=f"Tunnel ready: {saved}",
+                endpoint=saved,
+                pid=pid,
+            )
+        tail = _read_ngrok_log_tail(server_dir, line_count=2)
+        msg = "Ngrok is running; waiting for public URL"
+        if "ERR_NGROK_" in tail or "error" in tail.lower():
+            clean_tail = " ".join(tail.split())
+            if len(clean_tail) > 60:
+                clean_tail = clean_tail[:60] + "..."
+            msg = f"Ngrok: {clean_tail}"
         return TunnelStatus(
             provider="ngrok",
             state=TUNNEL_STATUS_PROCESS_RUNNING,
-            message="Ngrok is running; waiting for public URL",
+            message=msg,
             pid=pid,
         )
 

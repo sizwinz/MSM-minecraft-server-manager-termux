@@ -177,17 +177,10 @@ def build_screen_launch_command(
     startup_log: str | os.PathLike[str] | None = None,
 ) -> list[str]:
     shell = shutil.which("bash") or shutil.which("sh") or "sh"
-    if startup_log:
-        log_q = shlex.quote(str(startup_log))
-        shell_script = (
-            f"echo $$ > {shlex.quote(str(pid_file))}; "
-            f"exec {shlex.join(startup_command)} >> {log_q} 2>&1"
-        )
-    else:
-        shell_script = (
-            f"echo $$ > {shlex.quote(str(pid_file))}; "
-            f"exec {shlex.join(startup_command)}"
-        )
+    shell_script = (
+        f"echo $$ > {shlex.quote(str(pid_file))}; "
+        f"exec {shlex.join(startup_command)}"
+    )
     return ["screen", "-dmS", screen_name, shell, "-c", shell_script]
 
 

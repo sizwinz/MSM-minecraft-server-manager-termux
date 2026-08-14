@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import threading
@@ -1375,13 +1376,93 @@ def show_console(
         logger.log("ERROR", f"{current_server} is not running.")
         pause()
         return
-    print(f"{C.CYAN}Attaching to {current_server}. Detach with Ctrl+A then D.{C.RESET}")
-    time.sleep(1)
+    print(
+        f"\n{C.CYAN}Attaching to {current_server} (screen: {instance.screen_name})...{C.RESET}"
+    )
+    print(
+        f"{C.YELLOW}TIP: To detach without stopping the server, press Ctrl+A then D.{C.RESET}"
+    )
+    time.sleep(1.5)
+    env = os.environ.copy()
+    if running_on_termux():
+        termux_tmp = os.environ.get("TMPDIR") or "/data/data/com.termux/files/usr/tmp"
+        Path(termux_tmp).mkdir(parents=True, exist_ok=True)
+        env.setdefault("TMPDIR", termux_tmp)
+        env.setdefault("SCREENDIR", termux_tmp)
     try:
-        subprocess.run(["screen", "-r", instance.screen_name], check=False)
+        res = subprocess.run(
+            ["screen", "-x", instance.screen_name],
+            env=env,
+            check=False,
+        )
+        if res.returncode != 0:
+            subprocess.run(
+                ["screen", "-r", "-d", instance.screen_name],
+                env=env,
+                check=False,
+            )
     except FileNotFoundError:
         logger.log("ERROR", "screen is not installed.")
-        pause()
+    print(f"\n{C.DIM}Detached from console.{C.RESET}")
+    pause()
+
+
+def view_live_console(
+    runtime: RuntimeManager, config_manager: ConfigManager, logger
+) -> None:
+    config = ensure_current_server(config_manager)
+    current_server = config.get("current_server")
+    if not current_server:
+        return
+    instance = runtime.get_instance(current_server)
+    log_file = instance.server_dir / "logs" / "latest.log"
+
+    while True:
+        print_header(current_server, runtime)
+        is_running = instance.is_running()
+        status_text = (
+            f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
+            if is_running
+            else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
+        )
+        print(
+            f" {C.BOLD}Live Console Viewer:{C.RESET} {current_server} [{status_text}]"
+        )
+        print(f" {C.DIM}Log path: {log_file}{C.RESET}\n")
+
+        lines: list[str] = []
+        if log_file.exists():
+            try:
+                raw_lines = log_file.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+                lines = raw_lines[-25:]
+            except Exception as e:
+                lines = [f"[Error reading log: {e}]"]
+        else:
+            lines = ["[No log output generated yet]"]
+
+        width = min(get_terminal_width(), 100)
+        print(f"{C.PRIMARY}{'─' * width}{C.RESET}")
+        for line in lines:
+            if "ERROR" in line or "Exception" in line:
+                print(f"{C.RED}{line}{C.RESET}")
+            elif "WARN" in line:
+                print(f"{C.YELLOW}{line}{C.RESET}")
+            elif "INFO" in line:
+                print(f"{C.CYAN}{line[:11]}{C.RESET}{line[11:]}")
+            else:
+                print(f"{C.DIM}{line}{C.RESET}")
+        print(f"{C.PRIMARY}{'─' * width}{C.RESET}\n")
+
+        print(" [Enter] Refresh logs   [s] Send command   [a] Attach screen   [0] Back")
+        action = input(f"\n{C.BOLD}Action: {C.RESET}").strip().lower()
+        if action in ("0", "b", "q"):
+            return
+        elif action == "s":
+            send_command_menu(runtime, config_manager, logger)
+        elif action == "a":
+            show_console(runtime, config_manager, logger)
 
 
 def send_command_menu(
@@ -1396,17 +1477,33 @@ def send_command_menu(
         logger.log("ERROR", f"{current_server} is not running.")
         pause()
         return
-    while True:
-        print_header(current_server, runtime)
-        print(f" {C.BOLD}Send command to {current_server}:{C.RESET}")
-        print(" (Leave blank and press Enter to return)")
-        command = input("\n> ").strip()
-        if not command:
-            return
-        success = instance.send_command(command)
-        if not success:
-            logger.log("ERROR", "Command delivery failed.")
-        time.sleep(1)
+
+    print_header(current_server, runtime)
+    print(f" {C.BOLD}Send command to {current_server}:{C.RESET}")
+    print(" (e.g. 'help', 'list', 'op <player>', 'time set day')")
+    print(" (Leave blank and press Enter to return)")
+    command = input("\n> ").strip()
+    if not command:
+        return
+    success = instance.send_command(command)
+    if success:
+        logger.log("SUCCESS", f"Sent command '{command}' to {current_server}.")
+        time.sleep(0.5)
+        log_file = instance.server_dir / "logs" / "latest.log"
+        if log_file.exists():
+            try:
+                recent = log_file.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()[-5:]
+                if recent:
+                    print(f"\n{C.DIM}Recent console output:{C.RESET}")
+                    for ln in recent:
+                        print(f"  {ln}")
+            except Exception:
+                pass
+    else:
+        logger.log("ERROR", "Command delivery failed.")
+    pause()
 
 
 def server_console_menu(
@@ -1427,19 +1524,22 @@ def server_console_menu(
             else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
         )
         print(
-            f" {C.BOLD}Server Console & Commands:{C.RESET} {current_server} [{status_text}]\n"
+            f" {C.BOLD}Server Console & Logs:{C.RESET} {current_server} [{status_text}]\n"
         )
-        print(" [ 1] Attach to Live Interactive Console (Screen)")
+        print(" [ 1] View Live Console Logs (Mobile-friendly tail)")
         print(" [ 2] Send Single Command to Server")
+        print(" [ 3] Attach to Interactive Screen Terminal")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-2]: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose action [0-3]: {C.RESET}").strip()
         if choice == "0":
             return
         if choice == "1":
-            show_console(runtime, config_manager, logger)
+            view_live_console(runtime, config_manager, logger)
         elif choice == "2":
             send_command_menu(runtime, config_manager, logger)
+        elif choice == "3":
+            show_console(runtime, config_manager, logger)
         else:
             logger.log("ERROR", "Invalid choice.")
             pause()
