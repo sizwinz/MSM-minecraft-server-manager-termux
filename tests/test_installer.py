@@ -12,18 +12,26 @@ INSTALLER = REPO_ROOT / "install.sh"
 
 
 def _working_bash() -> str:
-    bash = shutil.which("bash")
-    if not bash:
-        pytest.skip("bash is required for installer dry-run tests")
-    result = subprocess.run(
-        [bash, "-c", "exit 0"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.skip("a working bash executable is required for installer dry-run tests")
-    return bash
+    candidates = [
+        shutil.which("bash"),
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, "-c", "exit 0"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                return candidate
+        except Exception:
+            continue
+    pytest.skip("a working bash executable is required for installer dry-run tests")
 
 
 def _write_stub(bin_dir: Path, name: str, body: str = "") -> None:
@@ -76,8 +84,7 @@ def test_termux_install_does_not_require_sudo_or_use_apt_get(tmp_path: Path) -> 
     assert "pkg update -y" in result.stdout
     assert "pkg upgrade -y" in result.stdout
     assert (
-        "pkg install -y python git screen openjdk-17 openjdk-21 "
-        "php python-psutil tur-repo playit"
+        "pkg install -y python git screen php python-psutil tur-repo playit"
     ) in result.stdout
     assert "sudo" not in result.stdout
     assert "apt-get" not in result.stdout
@@ -140,7 +147,7 @@ def test_installer_reuses_current_checkout(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "Using current checkout" in result.stdout
+    assert "Preparing MSM codebase" in result.stdout
     assert "git clone" not in result.stdout
 
 

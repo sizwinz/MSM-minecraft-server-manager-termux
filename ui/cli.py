@@ -91,17 +91,28 @@ def run_with_spinner(message: str, func, *args, **kwargs):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
-    spinner = "|/-\\"
+    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     index = 0
     while not state["done"]:
-        print(f"\r{message} {spinner[index % len(spinner)]}", end="", flush=True)
-        time.sleep(0.1)
+        print(
+            f"\r {C.PRIMARY}{spinner[index % len(spinner)]}{C.RESET} {message}",
+            end="",
+            flush=True,
+        )
+        time.sleep(0.08)
         index += 1
-    print("\r" + (" " * (len(message) + 4)) + "\r", end="", flush=True)
+    print("\r" + (" " * (len(message) + 8)) + "\r", end="", flush=True)
 
     if state["error"]:
         raise state["error"]
     return state["result"]
+
+
+def get_terminal_width(
+    default: int = 60, min_width: int = 36, max_width: int = 72
+) -> int:
+    cols = shutil.get_terminal_size((default, 24)).columns
+    return max(min_width, min(cols, max_width))
 
 
 def create_services():
@@ -122,20 +133,33 @@ def ensure_current_server(config_manager: ConfigManager) -> dict:
 
 def print_header(current_server: str | None, runtime: RuntimeManager) -> None:
     clear_screen()
+    width = get_terminal_width()
+    divider = f"{C.PRIMARY}{C.BOX_H * width}{C.RESET}"
+
     system_info = get_system_info()
     running_servers = runtime.running_servers()
     ram_usage = f"{system_info['available_ram_mb']}MB/{system_info['total_ram_mb']}MB"
-    cpu_info = f"{system_info['cpu_count']} cores @ {system_info['cpu_usage']:.1f}%"
-    print(f"{C.BOLD}{C.CYAN}{'=' * 72}{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}Minecraft Server Manager v{VERSION}{C.RESET}")
+    cpu_info = f"{system_info['cpu_count']}c @ {system_info['cpu_usage']:.1f}%"
+
     print(
-        f"{C.DIM}RAM: {ram_usage} | CPU: {cpu_info} "
-        f"| Platform: {system_info['platform']}{C.RESET}"
+        f"{C.BOLD}{C.PRIMARY}  MSM{C.RESET} "
+        f"{C.DIM}• Minecraft Server Manager v{VERSION}{C.RESET}"
     )
-    print(f"{C.DIM}Running servers: {len(running_servers)}{C.RESET}")
+    print(divider)
+
+    sys_full = f"RAM: {ram_usage}  CPU: {cpu_info}  OS: {system_info['platform']}"
+    if len(sys_full) + 16 <= width:
+        print(f" {C.DIM}{sys_full} • Active: {len(running_servers)}{C.RESET}")
+    else:
+        print(f" {C.DIM}RAM: {ram_usage} • CPU: {cpu_info}{C.RESET}")
+        print(
+            f" {C.DIM}OS: {system_info['platform']} "
+            f"• Active: {len(running_servers)}{C.RESET}"
+        )
+
     if current_server:
-        print(f"{C.DIM}Current server: {current_server}{C.RESET}")
-    print(f"{C.BOLD}{C.CYAN}{'=' * 72}{C.RESET}\n")
+        print(f" {C.DIM}Active Server:{C.RESET} {C.BOLD}{current_server}{C.RESET}")
+    print(divider + "\n")
 
 
 def print_connection_summary(instance) -> None:
@@ -150,11 +174,11 @@ def print_connection_summary(instance) -> None:
 
     tunnel_display = info["tunnel_url"] or info["tunnel_status"]
 
-    print(f"{C.DIM}Localhost: {info['loopback_endpoint']}{C.RESET}")
-    print(f"{C.DIM}LAN/Wi-Fi: {lan_display}{C.RESET}")
-    print(f"{C.DIM}Tunnel: {tunnel_display}{C.RESET}")
+    print(f"  {C.DIM}Localhost :{C.RESET} {info['loopback_endpoint']}")
+    print(f"  {C.DIM}LAN/Wi-Fi :{C.RESET} {lan_display}")
+    print(f"  {C.DIM}Tunnel    :{C.RESET} {tunnel_display}")
     if info.get("tunnel_setup_url"):
-        print(f"{C.DIM}Tunnel setup: {info['tunnel_setup_url']}{C.RESET}")
+        print(f"  {C.DIM}Setup URL :{C.RESET} {info['tunnel_setup_url']}")
 
 
 def resolve_tunnel_binary(binary_path: str) -> str | None:
@@ -563,7 +587,9 @@ def playit_setup_wizard(
                 )
                 generate_output = ""
                 if claim_generate:
-                    generate_output = f"{claim_generate.stdout or ''}\n{claim_generate.stderr or ''}".strip()
+                    gen_stdout = claim_generate.stdout or ""
+                    gen_stderr = claim_generate.stderr or ""
+                    generate_output = f"{gen_stdout}\n{gen_stderr}".strip()
                 raw_claim_line = extract_last_non_empty_line(generate_output)
                 claim_code = raw_claim_line.split()[-1] if raw_claim_line else None
 
@@ -593,7 +619,10 @@ def playit_setup_wizard(
                     )
                     url_output = ""
                     if claim_url_result:
-                        url_output = f"{claim_url_result.stdout or ''}\n{claim_url_result.stderr or ''}".strip()
+                        url_output = (
+                            f"{claim_url_result.stdout or ''}\n"
+                            f"{claim_url_result.stderr or ''}"
+                        ).strip()
                     claim_url = extract_playit_claim_url(url_output)
                     claim_url = claim_url or extract_last_non_empty_line(url_output)
                     if claim_url:
@@ -1463,30 +1492,55 @@ def main() -> None:
         flavor_name = SERVER_FLAVORS.get(flavor, {}).get("name", "Not installed")
         version = server_config.get("server_version") or "N/A"
         status = (
-            f"{C.GREEN}ONLINE{C.RESET}"
+            f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
             if instance.is_running()
-            else f"{C.RED}OFFLINE{C.RESET}"
+            else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
         )
 
         print_header(current_server, runtime)
-        print(f"{C.BOLD}{current_server}{C.RESET} | Status: {status}")
-        print(f"{C.DIM}{flavor_name} {version}{C.RESET}")
+        print(f" {C.BOLD}{current_server}{C.RESET}  [{status}]")
+        print(f" {C.DIM}{flavor_name} {version}{C.RESET}")
+        print()
         print_connection_summary(instance)
         print()
-        print(" 1. Start server")
-        print(" 2. Stop server")
-        print(" 3. Install or update server")
-        print(" 4. Configure server")
-        print(" 5. Edit server.properties and eula.txt")
-        print(" 6. Attach to console")
-        print(" 7. World manager")
-        print(" 8. Send command")
-        print(" 9. Statistics")
-        print("10. Create new server")
-        print("11. Switch server")
-        print(" 0. Exit")
 
-        choice = input(f"\n{C.BOLD}Choose action: {C.RESET}").strip()
+        width = get_terminal_width()
+        if width >= 65:
+            items = [
+                ("1", "Start server"),
+                ("7", "World manager"),
+                ("2", "Stop server"),
+                ("8", "Send command"),
+                ("3", "Install / update"),
+                ("9", "Statistics"),
+                ("4", "Configure server"),
+                ("10", "Create new server"),
+                ("5", "Edit properties & EULA"),
+                ("11", "Switch server"),
+                ("6", "Attach to console"),
+                ("0", "Exit"),
+            ]
+            for i in range(0, len(items), 2):
+                k1, t1 = items[i]
+                k2, t2 = items[i + 1]
+                left = f" [{k1:>2}] {t1}"
+                right = f" [{k2:>2}] {t2}"
+                print(f"{left:<30}{right}")
+        else:
+            print(" [ 1] Start server")
+            print(" [ 2] Stop server")
+            print(" [ 3] Install or update server")
+            print(" [ 4] Configure server")
+            print(" [ 5] Edit server.properties and eula.txt")
+            print(" [ 6] Attach to console")
+            print(" [ 7] World manager")
+            print(" [ 8] Send command")
+            print(" [ 9] Statistics")
+            print(" [10] Create new server")
+            print(" [11] Switch server")
+            print(" [ 0] Exit")
+
+        choice = input(f"\n{C.BOLD}Choose action [0-11]: {C.RESET}").strip()
         try:
             if choice == "1":
                 started = instance.start()

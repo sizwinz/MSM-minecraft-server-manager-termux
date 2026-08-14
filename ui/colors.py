@@ -24,6 +24,29 @@ class ColorScheme:
     WARNING = YELLOW
     INFO = BLUE
     DEBUG = DIM
+    PRIMARY = CYAN
+    ACCENT = GREEN
+    MUTED = DIM
+
+    # Box drawing and UI glyphs
+    BOX_TL = "╭"
+    BOX_TR = "╮"
+    BOX_BL = "╰"
+    BOX_BR = "╯"
+    BOX_H = "─"
+    BOX_V = "│"
+    BOX_T = "┬"
+    BOX_B = "┴"
+    BOX_L = "├"
+    BOX_R = "┤"
+    BOX_CROSS = "┼"
+
+    DOT_ON = "●"
+    DOT_OFF = "○"
+    CHECK = "✔"
+    CROSS = "✖"
+    ARROW = "➜"
+    BULLET = "•"
 
     @classmethod
     def disable_colors(cls) -> None:
@@ -31,7 +54,7 @@ class ColorScheme:
             if attr.startswith("_"):
                 continue
             value = getattr(cls, attr)
-            if not callable(value):
+            if isinstance(value, str) and value.startswith("\033"):
                 setattr(cls, attr, "")
 
 

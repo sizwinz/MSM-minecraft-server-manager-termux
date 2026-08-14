@@ -32,10 +32,11 @@ PLAYIT_CLAIM_URL_PATTERN = re.compile(
 )
 
 
-ANSI_ESCAPE_PATTERN = re.compile(r'\x1B(?:\[[0-9;]*[a-zA-Z]|\(B|\)0|#\d|[=>]|7|8)')
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1B(?:\[[0-9;]*[a-zA-Z]|\(B|\)0|#\d|[=>]|7|8)")
+
 
 def extract_last_non_empty_line(text: str) -> str | None:
-    text = ANSI_ESCAPE_PATTERN.sub('', text)
+    text = ANSI_ESCAPE_PATTERN.sub("", text)
     for line in reversed(text.splitlines()):
         stripped = line.strip()
         if stripped:

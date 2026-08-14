@@ -4,23 +4,144 @@ set -euo pipefail
 
 C_RESET='\033[0m'
 C_BOLD='\033[1m'
+C_DIM='\033[2m'
 C_GREEN='\033[92m'
 C_YELLOW='\033[93m'
 C_CYAN='\033[96m'
 C_RED='\033[91m'
+
+GLYPH_CHECK="✔"
+GLYPH_CROSS="✖"
+
+REPO_URL="https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git"
+REPO_DIR="MSM-minecraft-server-manager-termux"
+DRY_RUN="${MSM_INSTALL_DRY_RUN:-0}"
+VERBOSE="${VERBOSE:-0}"
+LOG_FILE="${MSM_INSTALL_LOG:-${TMPDIR:-/tmp}/msm-install.log}"
+TARGET_HOME="${HOME}"
+TARGET_USER="$(id -u -n 2>/dev/null || id -u 2>/dev/null || echo "${USER:-user}")"
+TARGET_GROUP="$(id -g -n 2>/dev/null || id -g 2>/dev/null || echo "${USER:-user}")"
+SUDO_CMD=()
+
+for arg in "$@"; do
+    case "$arg" in
+        -v|--verbose)
+            VERBOSE=1
+            ;;
+    esac
+done
 
 log_info() { echo -e "${C_BOLD}${C_CYAN}[INFO]${C_RESET} $*"; }
 log_success() { echo -e "${C_BOLD}${C_GREEN}[SUCCESS]${C_RESET} $*"; }
 log_warning() { echo -e "${C_BOLD}${C_YELLOW}[WARNING]${C_RESET} $*"; }
 log_error() { echo -e "${C_BOLD}${C_RED}[ERROR]${C_RESET} $*"; }
 
-REPO_URL="https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git"
-REPO_DIR="MSM-minecraft-server-manager-termux"
-DRY_RUN="${MSM_INSTALL_DRY_RUN:-0}"
-TARGET_HOME="${HOME}"
-TARGET_USER="$(id -u -n)"
-TARGET_GROUP="$(id -g -n)"
-SUDO_CMD=()
+get_term_width() {
+    local width=60
+    if command -v tput >/dev/null 2>&1; then
+        width=$(tput cols 2>/dev/null || echo 60)
+    fi
+    if [ -z "${width}" ] || [ "${width}" -lt 40 ]; then
+        width=40
+    elif [ "${width}" -gt 70 ]; then
+        width=70
+    fi
+    echo "${width}"
+}
+
+print_banner() {
+    local w
+    w=$(get_term_width)
+    local line
+    line=$(printf '─%.0s' $(seq 1 "${w}"))
+
+    echo -e "${C_CYAN}  __  __ ____  __  __ ${C_RESET}"
+    echo -e "${C_CYAN} |  \/  / ___||  \/  |${C_RESET}  ${C_BOLD}Minecraft Server Manager${C_RESET}"
+    echo -e "${C_CYAN} | |\/| \___ \| |\/| |${C_RESET}  ${C_DIM}Termux & Linux Edition${C_RESET}"
+    echo -e "${C_CYAN} |_|  |_|____/|_|  |_|${C_RESET}  ${C_DIM}v6.0${C_RESET}"
+    echo -e "${C_CYAN}${line}${C_RESET}\n"
+}
+
+show_failure_card() {
+    local failed_step="$1"
+    local w
+    w=$(get_term_width)
+    local line
+    line=$(printf '─%.0s' $(seq 1 "$((w - 2))"))
+
+    echo -e "\n${C_RED}╭${line}╮${C_RESET}"
+    echo -e "${C_RED}│${C_RESET}  ${C_BOLD}Installation Error${C_RESET}"
+    echo -e "${C_RED}│${C_RESET}  Failed step: ${failed_step}"
+    echo -e "${C_RED}│${C_RESET}  Log file   : ${LOG_FILE}"
+    echo -e "${C_RED}├${line}┤${C_RESET}"
+    if [ -f "${LOG_FILE}" ]; then
+        tail -n 10 "${LOG_FILE}" | while IFS= read -r l; do
+            local clean_l="${l:0:$((w - 6))}"
+            echo -e "${C_DIM}│  ${clean_l}${C_RESET}"
+        done
+    fi
+    echo -e "${C_RED}╰${line}╯${C_RESET}"
+    echo -e "\n${C_YELLOW}Tip:${C_RESET} Re-run with ${C_BOLD}VERBOSE=1 bash install.sh${C_RESET} to view detailed output."
+}
+
+run_step() {
+    local step_num="$1"
+    local step_total="$2"
+    local title="$3"
+    shift 3
+
+    if [ "${DRY_RUN}" = "1" ]; then
+        echo -e " ${C_GREEN}${GLYPH_CHECK}${C_RESET} [${step_num}/${step_total}] ${title}"
+        "$@"
+        return $?
+    fi
+
+    if [ "${VERBOSE}" = "1" ]; then
+        echo -e "\n${C_BOLD}${C_CYAN}──▶ [${step_num}/${step_total}] ${title}...${C_RESET}"
+        "$@"
+        return $?
+    fi
+
+    mkdir -p "$(dirname "${LOG_FILE}")" 2>/dev/null || true
+    echo -e "\n=== STEP [${step_num}/${step_total}]: ${title} ===" >> "${LOG_FILE}"
+
+    "$@" >> "${LOG_FILE}" 2>&1 &
+    local cmd_pid=$!
+
+    local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local i=0
+
+    if [ -t 1 ]; then
+        while kill -0 "${cmd_pid}" 2>/dev/null; do
+            local spinner="${spin_chars[i % 10]}"
+            printf "\r \033[96m%s\033[0m [%s/%s] %s" "${spinner}" "${step_num}" "${step_total}" "${title}..."
+            sleep 0.08
+            i=$((i + 1))
+        done
+    else
+        wait "${cmd_pid}"
+    fi
+
+    wait "${cmd_pid}"
+    local exit_code=$?
+
+    if [ "${exit_code}" -eq 0 ]; then
+        if [ -t 1 ]; then
+            printf "\r\033[K \033[92m%s\033[0m [%s/%s] %s\n" "${GLYPH_CHECK}" "${step_num}" "${step_total}" "${title}"
+        else
+            echo -e " ${C_GREEN}${GLYPH_CHECK}${C_RESET} [${step_num}/${step_total}] ${title}"
+        fi
+        return 0
+    else
+        if [ -t 1 ]; then
+            printf "\r\033[K \033[91m%s\033[0m [%s/%s] %s\n" "${GLYPH_CROSS}" "${step_num}" "${step_total}" "${title}"
+        else
+            echo -e " ${C_RED}${GLYPH_CROSS}${C_RESET} [${step_num}/${step_total}] ${title}"
+        fi
+        show_failure_card "${title}"
+        return "${exit_code}"
+    fi
+}
 
 run() {
     if [ "${DRY_RUN}" = "1" ]; then
@@ -65,8 +186,7 @@ setup_privilege() {
             TARGET_HOME="${TARGET_HOME:-${HOME}}"
         fi
     elif command -v sudo >/dev/null 2>&1; then
-        # Check if we can sudo (prompts if not cached)
-        if ! sudo -v 2>/dev/null; then
+        if [ "${DRY_RUN}" != "1" ] && ! sudo -v 2>/dev/null; then
             log_error "Root privileges are required for Debian/Ubuntu system packages."
             exit 1
         fi
@@ -78,12 +198,15 @@ setup_privilege() {
     fi
 }
 
-install_termux_dependencies() {
-    log_info "Termux detected. Updating packages..."
-    run pkg update -y
-    run pkg upgrade -y
+update_termux_repos() {
+    if ! run pkg update -y; then
+        rm -rf "${PREFIX}/var/lib/apt/lists/"* 2>/dev/null || true
+        run pkg update -y || true
+    fi
+    run pkg upgrade -y || true
+}
 
-    log_info "Installing Termux dependencies..."
+install_termux_dependencies() {
     run pkg install -y python git screen php python-psutil tur-repo playit
 
     if command -v playit >/dev/null 2>&1 && ! command -v playit-cli >/dev/null 2>&1; then
@@ -96,11 +219,9 @@ install_adoptium_java() {
     local java_dir="${TARGET_HOME}/.config/msm/java/${version}"
 
     if [ -d "${java_dir}" ] && [ -x "${java_dir}/bin/java" ]; then
-        log_info "Java ${version} is already installed at ${java_dir}."
-        return
+        return 0
     fi
 
-    log_info "Downloading Java ${version} from Adoptium..."
     local arch
     arch=$(uname -m)
     case "${arch}" in
@@ -111,25 +232,24 @@ install_adoptium_java() {
     esac
 
     local os="linux"
-    # Adoptium Uses 'linux' for both standard Linux and Termux/Android environments.
-
-    # Using the /v3/binary/latest endpoint which redirects directly to the tarball.
     local download_url="https://api.adoptium.net/v3/binary/latest/${version}/ga/${os}/${arch}/jre/hotspot/normal/eclipse"
-
-    log_info "Downloading: ${download_url}"
     local tmp_tar="${TMPDIR:-/tmp}/java_${version}.tar.gz"
 
-    # Use -L to follow redirects from the Adoptium API to GitHub
     if ! run curl -fsSL "${download_url}" -o "${tmp_tar}"; then
         log_error "Failed to download Java ${version} from Adoptium."
         return 1
     fi
 
-    log_info "Extracting Java ${version}..."
     as_install_user mkdir -p "${java_dir}"
     as_install_user tar -xzf "${tmp_tar}" -C "${java_dir}" --strip-components=1
     run rm -f "${tmp_tar}"
 }
+
+setup_all_java_runtimes() {
+    install_adoptium_java 17
+    install_adoptium_java 21
+}
+
 install_apt_package_if_available() {
     local package_name="$1"
     local required="${2:-required}"
@@ -142,11 +262,9 @@ install_apt_package_if_available() {
 
 install_playit_debian() {
     if command -v playit >/dev/null 2>&1 || command -v playit-cli >/dev/null 2>&1; then
-        log_info "Playit is already installed."
-        return
+        return 0
     fi
 
-    log_info "Installing Playit from the official apt repository..."
     local key_path="${TMPDIR:-/tmp}/playit-cloud-key.gpg"
     run curl -fsSL https://playit-cloud.github.io/ppa/key.gpg -o "${key_path}"
     priv gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg "${key_path}"
@@ -157,15 +275,8 @@ install_playit_debian() {
 }
 
 install_debian_dependencies() {
-    log_info "Debian/Ubuntu/WSL detected. Updating packages..."
-    priv apt-get update -y
-
-    log_info "Installing base dependencies..."
     priv apt-get install -y git screen python3 python3-pip python3-venv curl gnupg ca-certificates
-
-    log_info "Installing php-cli when available..."
     install_apt_package_if_available php-cli optional
-
     install_playit_debian
 }
 
@@ -176,20 +287,16 @@ using_current_checkout() {
 prepare_checkout() {
     if using_current_checkout; then
         INSTALL_DIR="$(pwd)"
-        log_info "Using current checkout: ${INSTALL_DIR}"
     else
         INSTALL_DIR="${MSM_INSTALL_DIR:-${TARGET_HOME}/${REPO_DIR}}"
         if [ -f "${INSTALL_DIR}/msm.py" ] && [ -f "${INSTALL_DIR}/requirements.txt" ]; then
-            log_info "Reusing existing checkout: ${INSTALL_DIR}"
+            :
         else
-            log_info "Cloning MSM into ${INSTALL_DIR}..."
             as_install_user git clone "${REPO_URL}" "${INSTALL_DIR}"
         fi
     fi
 
-    # Fix ownership of the installation directory if it exists and we are not root
     if [ -d "${INSTALL_DIR}" ] && [ "${TARGET_USER}" != "root" ] && { [ "$(id -u)" -eq 0 ] || [ "${#SUDO_CMD[@]}" -ne 0 ]; }; then
-        log_info "Ensuring correct ownership of ${INSTALL_DIR} for ${TARGET_USER}..."
         priv chown -R "${TARGET_USER}:${TARGET_GROUP}" "${INSTALL_DIR}"
     fi
 
@@ -207,45 +314,54 @@ configure_python_environment() {
         python_bin="python"
     fi
 
-    log_info "Creating Python virtual environment..."
-    # If .venv exists but isn't writable, remove it with privileges
     if [ -d ".venv" ] && [ ! -w ".venv" ]; then
-        log_info "Removing unwritable .venv..."
         priv rm -rf .venv
     fi
     as_install_user "${python_bin}" -m venv "${venv_args[@]}" .venv
 
-    log_info "Installing Python dependencies..."
     as_install_user .venv/bin/python -m pip install --upgrade pip
     as_install_user .venv/bin/python -m pip install -r requirements.txt
     as_install_user chmod +x msm.py
 }
 
+print_success_card() {
+    local w
+    w=$(get_term_width)
+    local line
+    line=$(printf '─%.0s' $(seq 1 "$((w - 2))"))
+
+    echo -e "\n${C_GREEN}╭${line}╮${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}  ${C_BOLD}✨ MSM installed successfully!${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}  To launch MSM:"
+    echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}cd ${INSTALL_DIR}${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}source .venv/bin/activate${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}python msm.py${C_RESET}"
+    echo -e "${C_GREEN}╰${line}╯${C_RESET}\n"
+}
+
 main() {
-    log_info "Starting MSM installation..."
+    print_banner
 
     if is_termux; then
         setup_privilege termux
-        install_termux_dependencies
+        run_step 1 5 "Updating package repositories" update_termux_repos
+        run_step 2 5 "Installing core dependencies (git, screen, playit, python)" install_termux_dependencies
     elif is_debian_like; then
         setup_privilege debian
-        install_debian_dependencies
+        run_step 1 5 "Updating package repositories" priv apt-get update -y
+        run_step 2 5 "Installing core dependencies (git, screen, playit, python)" install_debian_dependencies
     else
         log_error "Only Termux and Debian/Ubuntu/WSL are supported by this installer."
         log_info "Install python, git, screen, Java 17/21, php, and playit manually, then run MSM."
         exit 1
     fi
 
-    log_info "Installing Java runtimes from Adoptium..."
-    install_adoptium_java 17
-    install_adoptium_java 21
+    run_step 3 5 "Setting up Java runtimes (Adoptium 17 & 21)" setup_all_java_runtimes
+    run_step 4 5 "Preparing MSM codebase" prepare_checkout
+    run_step 5 5 "Configuring Python virtual environment" configure_python_environment
 
-    prepare_checkout
-    configure_python_environment
-
-    log_success "MSM has been installed successfully."
-    echo -e "\nRun MSM with:"
-    echo -e "${C_GREEN}cd ${INSTALL_DIR} && source .venv/bin/activate && python msm.py${C_RESET}"
+    print_success_card
 }
 
 main "$@"
