@@ -1,8 +1,7 @@
 """Ngrok agent lifecycle, status inspection, and diagnostics."""
 
-from __future__ import annotations
-
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -84,6 +83,40 @@ def save_ngrok_endpoint(server_dir: Path, endpoint: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _extract_endpoint_or_error_from_log(
+    server_dir: Path,
+) -> tuple[str | None, str | None]:
+    """Extract public URL or error message directly from ngrok log output."""
+    log_path = server_dir / ".msm.ngrok.log"
+    if not log_path.exists():
+        return None, None
+    try:
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+
+    # 1. Check for public TCP endpoint: url=tcp://0.tcp.ngrok.io:12345
+    match = re.search(r'url=[\'"]?(tcp://[^\s\'"]+)', content)
+    if match:
+        return match.group(1), None
+
+    # 2. Check for explicit error messages: lvl=eror ...
+    err_match = re.search(
+        r'lvl=(?:eror|crit)\s+msg="([^"]+)"(?:\s+err="([^"]+)")?', content
+    )
+    if err_match:
+        msg = err_match.group(1)
+        detail = err_match.group(2)
+        return None, f"{msg} ({detail})" if detail else msg
+
+    # 3. Check for ERR_NGROK_ codes
+    err_code = re.search(r"(ERR_NGROK_[0-9]+[^\n\r\"]*)", content)
+    if err_code:
+        return None, err_code.group(1)
+
+    return None, None
+
+
 def _read_ngrok_log_tail(server_dir: Path, line_count: int = 10) -> str:
     """Return the last *line_count* lines of the ngrok log."""
     log_path = server_dir / ".msm.ngrok.log"
@@ -106,12 +139,23 @@ def inspect_ngrok_status(
     port: int,
     logger=None,
 ) -> TunnelStatus:
-    """Derive a *TunnelStatus* from the PID file and the ngrok API."""
+    """Derive a *TunnelStatus* from the PID file, the ngrok API, and log output."""
     pid = read_pid_file(server_dir / TUNNEL_PID_FILE_NAME)
     running = pid is not None and is_pid_running(pid)
 
     if running:
         endpoint = get_ngrok_public_url(port, logger=logger, timeout=2)
+        if not endpoint:
+            log_url, log_err = _extract_endpoint_or_error_from_log(server_dir)
+            if log_url:
+                endpoint = log_url
+            elif log_err:
+                return TunnelStatus(
+                    provider="ngrok",
+                    state=TUNNEL_STATUS_FAILED,
+                    message=f"Ngrok error: {log_err}",
+                    pid=pid,
+                )
         if endpoint:
             save_ngrok_endpoint(server_dir, endpoint)
             return TunnelStatus(
@@ -219,12 +263,26 @@ def start_ngrok_agent(
 
     log_handle.flush()
 
-    # Poll the ngrok API for the public URL.
+    # Poll the ngrok API and log output for the public URL.
     poll_timeout = min(NGROK_TIMEOUT, 15)
     poll_deadline = time.monotonic() + poll_timeout
     public_url: str | None = None
     while time.monotonic() < poll_deadline:
         public_url = get_ngrok_public_url(port, logger=logger, timeout=2)
+        if not public_url:
+            log_url, log_err = _extract_endpoint_or_error_from_log(server_dir)
+            if log_url:
+                public_url = log_url
+            elif log_err:
+                return (
+                    TunnelStatus(
+                        provider="ngrok",
+                        state=TUNNEL_STATUS_FAILED,
+                        message=f"Ngrok: {log_err}",
+                        pid=process.pid,
+                    ),
+                    log_handle,
+                )
         if public_url:
             break
         time.sleep(1)
