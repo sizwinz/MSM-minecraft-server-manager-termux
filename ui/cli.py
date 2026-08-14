@@ -138,27 +138,20 @@ def print_header(current_server: str | None, runtime: RuntimeManager) -> None:
 
     system_info = get_system_info()
     running_servers = runtime.running_servers()
-    ram_usage = f"{system_info['available_ram_mb']}MB/{system_info['total_ram_mb']}MB"
-    cpu_info = f"{system_info['cpu_count']}c @ {system_info['cpu_usage']:.1f}%"
+    ram_usage = f"{system_info['available_ram_mb']}MB / {system_info['total_ram_mb']}MB"
+    cpu_info = f"{system_info['cpu_count']} cores @ {system_info['cpu_usage']:.1f}%"
 
     print(
         f"{C.BOLD}{C.PRIMARY}  MSM{C.RESET} "
         f"{C.DIM}• Minecraft Server Manager v{VERSION}{C.RESET}"
     )
     print(divider)
-
-    sys_full = f"RAM: {ram_usage}  CPU: {cpu_info}  OS: {system_info['platform']}"
-    if len(sys_full) + 16 <= width:
-        print(f" {C.DIM}{sys_full} • Active: {len(running_servers)}{C.RESET}")
-    else:
-        print(f" {C.DIM}RAM: {ram_usage} • CPU: {cpu_info}{C.RESET}")
-        print(
-            f" {C.DIM}OS: {system_info['platform']} "
-            f"• Active: {len(running_servers)}{C.RESET}"
-        )
-
+    print(f"  {C.DIM}RAM     :{C.RESET} {ram_usage}")
+    print(f"  {C.DIM}CPU     :{C.RESET} {cpu_info}")
+    print(f"  {C.DIM}OS      :{C.RESET} {system_info['platform']}")
+    print(f"  {C.DIM}Running :{C.RESET} {len(running_servers)} server(s)")
     if current_server:
-        print(f" {C.DIM}Active Server:{C.RESET} {C.BOLD}{current_server}{C.RESET}")
+        print(f"  {C.DIM}Selected:{C.RESET} {C.BOLD}{current_server}{C.RESET}")
     print(divider + "\n")
 
 
@@ -951,33 +944,41 @@ def configure_server(
         config = config_manager.load()
         server_config = config["servers"][current_server]
         print_header(current_server, runtime)
-        print(f"{C.BOLD}Configure {current_server}{C.RESET}")
-        print(f" 1. RAM MB: {server_config['ram_mb']}")
-        print(f" 2. Port: {server_config['server_settings']['port']}")
-        print(f" 3. Auto restart: {server_config['auto_restart']}")
-        print(f" 4. MOTD: {server_config['server_settings']['motd']}")
-        print(f" 5. Max players: {server_config['server_settings']['max-players']}")
-        print(f" 6. Online mode: {server_config['server_settings']['online-mode']}")
-        print(f" 7. Scheduled backups: {server_config['backup_settings']['enabled']}")
+        print(f" {C.BOLD}Configure Server:{C.RESET} {current_server}\n")
+        print(f" [ 1] RAM MB              : {server_config['ram_mb']}")
+        print(f" [ 2] Server Port         : {server_config['server_settings']['port']}")
+        print(f" [ 3] Auto restart        : {server_config['auto_restart']}")
+        print(f" [ 4] Server MOTD         : {server_config['server_settings']['motd']}")
         print(
-            f" 8. Backup interval hours: {server_config['backup_settings']['interval_hours']}"
-        )
-        print(f" 9. Tunnel enabled: {server_config['tunnel']['enabled']}")
-        print(f"10. Tunnel provider: {server_config['tunnel']['provider']}")
-        print(f"11. Tunnel binary: {server_config['tunnel']['binary_path']}")
-        print(f"12. Tunnel protocol: {server_config['tunnel'].get('protocol', 'tcp')}")
-        print(
-            f"13. Tunnel local host: {server_config['tunnel'].get('local_host', '127.0.0.1')}"
+            f" [ 5] Max players         : {server_config['server_settings']['max-players']}"
         )
         print(
-            f"14. Tunnel local port: {server_config['tunnel'].get('local_port') or 'auto'}"
+            f" [ 6] Online mode         : {server_config['server_settings']['online-mode']}"
         )
-        print("15. Tunnel setup wizard")
-        print(f"16. RCON enabled: {server_config['rcon']['enabled']}")
-        print(f"17. RCON password set: {bool(server_config['rcon']['password'])}")
-        print(" 0. Back")
+        print(
+            f" [ 7] Scheduled backups   : {server_config['backup_settings']['enabled']}"
+        )
+        print(
+            f" [ 8] Backup interval (h) : {server_config['backup_settings']['interval_hours']}"
+        )
+        print(f" [ 9] Tunnel enabled      : {server_config['tunnel']['enabled']}")
+        print(f" [10] Tunnel provider     : {server_config['tunnel']['provider']}")
+        print(f" [11] Tunnel binary       : {server_config['tunnel']['binary_path']}")
+        print(
+            f" [12] Tunnel protocol     : {server_config['tunnel'].get('protocol', 'tcp')}"
+        )
+        print(
+            f" [13] Tunnel local host   : {server_config['tunnel'].get('local_host', '127.0.0.1')}"
+        )
+        print(
+            f" [14] Tunnel local port   : {server_config['tunnel'].get('local_port') or 'auto'}"
+        )
+        print(" [15] Tunnel setup wizard")
+        print(f" [16] RCON enabled        : {server_config['rcon']['enabled']}")
+        print(f" [17] RCON password set   : {bool(server_config['rcon']['password'])}")
+        print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose setting: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose setting [0-17]: {C.RESET}").strip()
         if choice == "0":
             return
         try:
