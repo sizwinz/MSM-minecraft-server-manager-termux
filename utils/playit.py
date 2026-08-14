@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import socket
 import subprocess
@@ -92,6 +93,22 @@ def get_saved_playit_endpoint(server_dir: Path) -> str | None:
 def save_playit_endpoint(server_dir: Path, endpoint: str) -> None:
     """Persist the current playit public endpoint."""
     write_text_file(server_dir / PLAYIT_ENDPOINT_FILE_NAME, endpoint)
+
+
+def extract_playit_secret_from_file(path: Path) -> str | None:
+    """Extract secret key from a .secret or playit.toml file."""
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    match = re.search(r'secret(?:_key)?\s*=\s*"([^"]+)"', content)
+    if match:
+        return match.group(1)
+    if content and not content.startswith("["):
+        return content
+    return None
 
 
 # ---------------------------------------------------------------------------

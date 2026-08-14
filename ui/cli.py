@@ -31,7 +31,12 @@ from ui.colors import C
 from utils.logging_utils import EnhancedLogger
 from utils.network import download_ngrok_binary, get_versions_for_flavor
 from utils.ngrok import diagnose_ngrok, resolve_ngrok_binary
-from utils.playit import diagnose_playit, read_playit_log_tail, resolve_playit_binary
+from utils.playit import (
+    diagnose_playit,
+    extract_playit_secret_from_file,
+    read_playit_log_tail,
+    resolve_playit_binary,
+)
 from utils.playit_api import (
     PLAYIT_THIRD_PARTY_AUTH_URL,
     PlayitApiClient,
@@ -673,6 +678,12 @@ def playit_setup_wizard(
                 for _ in range(10):
                     if secret_file.exists() and secret_file.stat().st_size > 0:
                         break
+                    global_toml = Path.home() / ".config" / "playit_gg" / "playit.toml"
+                    if global_toml.exists():
+                        toml_sec = extract_playit_secret_from_file(global_toml)
+                        if toml_sec:
+                            write_text_file(secret_file, toml_sec)
+                            break
                     time.sleep(0.5)
 
                 if secret_file.exists() and secret_file.stat().st_size > 0:
