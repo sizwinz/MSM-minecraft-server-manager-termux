@@ -211,11 +211,10 @@ def save_tunnel_config(
             tunnel["local_port"] = local_port
 
     config_manager.mutate(updater)
-    if instance.is_running():
-        if enabled:
-            instance.restart_tunnel()
-        else:
-            instance.stop_tunnel()
+    if enabled:
+        instance.restart_tunnel()
+    else:
+        instance.stop_tunnel()
     logger.log(
         "SUCCESS",
         f"Tunnel settings saved for {current_server}.",
@@ -737,34 +736,45 @@ def tunnel_manager_menu(
         print_connection_summary(instance)
         print()
 
-        print(" [ 1] Setup Playit.gg (Recommended - Free & Fast)")
-        print(" [ 2] Setup Ngrok")
-        print(" [ 3] Test & Diagnose Tunnel Health")
-        print(" [ 4] Advanced Tunnel Settings (Host, Port, Protocol, Binary)")
+        print(" [ 1] Start / Restart Tunnel")
+        print(" [ 2] Stop Tunnel")
+        print(" [ 3] Setup Playit.gg (Recommended - Free & Fast)")
+        print(" [ 4] Setup Ngrok")
+        print(" [ 5] Test & Diagnose Tunnel Health")
+        print(" [ 6] Advanced Tunnel Settings (Host, Port, Protocol, Binary)")
         if enabled:
-            print(" [ 5] Disable Tunnel")
+            print(" [ 7] Disable Tunnel")
         else:
-            print(" [ 5] Enable Tunnel")
+            print(" [ 7] Enable Tunnel")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-5]: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose action [0-7]: {C.RESET}").strip()
         if choice == "0":
             return
         if choice == "1":
-            playit_setup_wizard(runtime, config_manager, current_server, logger)
+            instance.restart_tunnel()
+            pause()
             continue
         if choice == "2":
-            ngrok_setup_wizard(runtime, config_manager, current_server, logger)
+            instance.stop_tunnel()
+            logger.log("SUCCESS", f"Stopped tunnel for {current_server}.")
+            pause()
             continue
         if choice == "3":
+            playit_setup_wizard(runtime, config_manager, current_server, logger)
+            continue
+        if choice == "4":
+            ngrok_setup_wizard(runtime, config_manager, current_server, logger)
+            continue
+        if choice == "5":
             tunnel_diagnostics_screen(
                 runtime, config_manager, current_server, logger, provider=provider
             )
             continue
-        if choice == "4":
+        if choice == "6":
             configure_tunnel_advanced(runtime, config_manager, current_server, logger)
             continue
-        if choice == "5":
+        if choice == "7":
             binary_path = tunnel.get(
                 "binary_path",
                 DEFAULT_TUNNEL_BINARIES.get(provider, "playit-cli"),

@@ -546,8 +546,7 @@ class ServerInstance:
 
     def restart_tunnel(self) -> None:
         self.stop_tunnel()
-        if self.is_running():
-            self.start_tunnel()
+        self.start_tunnel()
 
     def stop(self, force: bool = False) -> bool:
         with self._lock:
