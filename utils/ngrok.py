@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
-from typing import Any
 import socket
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from core.constants import (
     NGROK_ENDPOINT_FILE_NAME,
@@ -39,7 +40,7 @@ def resolve_ngrok_binary(binary_path: str | None = None) -> str | None:
     candidates: list[str] = []
     if binary_path:
         candidates.append(binary_path)
-    candidates.append("ngrok")
+    candidates.extend(["ngrok", "termux-ngrok"])
     for candidate in candidates:
         resolved = shutil.which(candidate)
         if resolved:
@@ -50,6 +51,16 @@ def resolve_ngrok_binary(binary_path: str | None = None) -> str | None:
         home_candidate = Path.home() / "bin" / candidate
         if home_candidate.exists() and home_candidate.is_file():
             return str(home_candidate)
+        prefix_bin = (
+            Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+            / "bin"
+            / candidate
+        )
+        if prefix_bin.exists() and prefix_bin.is_file():
+            return str(prefix_bin)
+        termux_ngrok_dir = Path.home() / "termux-ngrok" / candidate
+        if termux_ngrok_dir.exists() and termux_ngrok_dir.is_file():
+            return str(termux_ngrok_dir)
     return None
 
 
