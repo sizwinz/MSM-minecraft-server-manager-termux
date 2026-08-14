@@ -231,7 +231,12 @@ def start_ngrok_agent(
 
     log_path = server_dir / ".msm.ngrok.log"
     log_handle = log_path.open("a", encoding="utf-8")
-    command = [resolved, "tcp", str(port), "--log", "stdout"]
+    target_addr = f"127.0.0.1:{port}"
+    chroot_bin = shutil.which("termux-chroot")
+    if chroot_bin:
+        command = [chroot_bin, resolved, "tcp", target_addr, "--log", "stdout"]
+    else:
+        command = [resolved, "tcp", target_addr, "--log", "stdout"]
     process = subprocess.Popen(
         command,
         cwd=server_dir,
