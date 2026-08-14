@@ -288,13 +288,11 @@ class ServerInstance:
             java_binary = get_java_path(version, config, logger=self.logger)
             if not java_binary:
                 raise RuntimeError("A compatible Java runtime could not be located.")
+            xms_mb = max(256, min(ram_mb // 2, 1024))
             return [
                 java_binary,
                 f"-Xmx{ram_mb}M",
-                f"-Xms{ram_mb}M",
-                "-XX:+UseG1GC",
-                "-XX:+ParallelRefProcEnabled",
-                "-XX:MaxGCPauseMillis=200",
+                f"-Xms{xms_mb}M",
                 "-jar",
                 artifact,
                 "nogui",
@@ -451,10 +449,13 @@ class ServerInstance:
             self.auto_restart_stop_event = threading.Event()
             self.backup_stop_event = threading.Event()
             startup_command = self.build_startup_command()
+            startup_log = self.server_dir / "logs" / "latest.log"
+            startup_log.parent.mkdir(parents=True, exist_ok=True)
             launch_command = build_screen_launch_command(
                 self.screen_name,
                 startup_command,
                 self.pid_file,
+                startup_log=startup_log,
             )
             started = run_command(
                 launch_command, logger=self.logger, cwd=self.server_dir
@@ -466,9 +467,30 @@ class ServerInstance:
                 return False
             pid = wait_for_pid_file(self.pid_file)
             if not pid:
-                self.logger.log(
-                    "ERROR", f"Unable to determine a PID for {self.server_name}."
-                )
+                recent_err = ""
+                if startup_log.exists():
+                    try:
+                        lines = [
+                            ln.strip()
+                            for ln in startup_log.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).splitlines()
+                            if ln.strip()
+                        ]
+                        if lines:
+                            recent_err = lines[-1]
+                    except Exception:
+                        pass
+                if recent_err:
+                    self.logger.log(
+                        "ERROR",
+                        f"Failed to start {self.server_name}: {recent_err}",
+                    )
+                else:
+                    self.logger.log(
+                        "ERROR",
+                        f"Unable to determine a PID for {self.server_name}.",
+                    )
                 return False
             _config, server_config = self.refresh_config()
             session_id = self.db_manager.log_session_start(

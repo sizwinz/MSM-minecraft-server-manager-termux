@@ -51,6 +51,17 @@ def run_command(
     """Execute a subprocess without shell expansion."""
     if isinstance(command, str):
         command = shlex.split(command)
+    exec_env = os.environ.copy()
+    if env:
+        exec_env.update(env)
+    if running_on_termux():
+        termux_tmp = os.environ.get("TMPDIR") or "/data/data/com.termux/files/usr/tmp"
+        try:
+            Path(termux_tmp).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        exec_env.setdefault("TMPDIR", termux_tmp)
+        exec_env.setdefault("SCREENDIR", termux_tmp)
     try:
         if logger:
             logger.log(
@@ -67,7 +78,7 @@ def run_command(
             text=True,
             timeout=timeout,
             cwd=cwd,
-            env=env or os.environ.copy(),
+            env=exec_env,
         )
     except subprocess.CalledProcessError as exc:
         if logger:
@@ -163,11 +174,21 @@ def build_screen_launch_command(
     screen_name: str,
     startup_command: list[str],
     pid_file: str | os.PathLike[str],
+    startup_log: str | os.PathLike[str] | None = None,
 ) -> list[str]:
-    shell_script = (
-        f"echo $$ > {shlex.quote(str(pid_file))}; exec {shlex.join(startup_command)}"
-    )
-    return ["screen", "-dmS", screen_name, "sh", "-c", shell_script]
+    shell = shutil.which("bash") or shutil.which("sh") or "sh"
+    if startup_log:
+        log_q = shlex.quote(str(startup_log))
+        shell_script = (
+            f"echo $$ > {shlex.quote(str(pid_file))}; "
+            f"exec {shlex.join(startup_command)} >> {log_q} 2>&1"
+        )
+    else:
+        shell_script = (
+            f"echo $$ > {shlex.quote(str(pid_file))}; "
+            f"exec {shlex.join(startup_command)}"
+        )
+    return ["screen", "-dmS", screen_name, shell, "-c", shell_script]
 
 
 def wait_for_pid_file(
