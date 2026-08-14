@@ -88,17 +88,34 @@ def _fetch_paper_build(
         )
         if not response:
             return None
-        builds = response.json().get("builds", [])
+        data = response.json()
+        builds = data if isinstance(data, list) else data.get("builds", [])
         if not builds:
             return None
-        latest = builds[-1]
-        application = latest.get("downloads", {}).get("application", {})
+        # V3 returns newest first ([0]), V2 returned oldest first ([-1])
+        latest = (
+            builds[0]
+            if isinstance(data, list) or (builds and "id" in builds[0])
+            else builds[-1]
+        )
+        downloads = latest.get("downloads", {})
+        server_dl = (
+            downloads.get("server:default")
+            or downloads.get("application")
+            or (next(iter(downloads.values())) if downloads else {})
+        )
+        checksums = server_dl.get("checksums", {})
+        sha256 = checksums.get("sha256") or server_dl.get("sha256")
+        download_name = server_dl.get("name") or f"paper-{version}.jar"
+        download_url = server_dl.get("url")
+
         return (
             version,
             {
-                "latest_build": latest.get("build"),
-                "download_name": application.get("name"),
-                "sha256": application.get("sha256"),
+                "latest_build": latest.get("id") or latest.get("build"),
+                "download_name": download_name,
+                "download_url": download_url,
+                "sha256": sha256,
                 "is_snapshot": is_snapshot_version(version),
             },
         )
@@ -142,12 +159,24 @@ def get_paper_like_versions(
         project = safe_request(session, "GET", api_base, logger=logger)
         if not project:
             return {}
-        versions = project.json().get("versions", [])
+        data = project.json()
+        raw_versions = data.get("versions", [])
+        versions: list[str] = []
+        if isinstance(raw_versions, dict):
+            # Fill v3 format: {"26.2": ["26.2", ...], "1.21": ["1.21.11", ...]}
+            for v_list in raw_versions.values():
+                if isinstance(v_list, list):
+                    versions.extend(v_list)
+        elif isinstance(raw_versions, list):
+            # V2 or flat list: ["1.20.5", "1.20.6"]
+            # If list is ascending, reverse to show newest first
+            versions = list(reversed(raw_versions))
+
         if not include_snapshots:
             versions = [
                 version for version in versions if not is_snapshot_version(version)
             ]
-        selected_versions = list(reversed(versions[-PAPER_VERSION_LOOKBACK:]))
+        selected_versions = versions[:PAPER_VERSION_LOOKBACK]
         results: dict[str, Any] = {}
         with ThreadPoolExecutor(
             max_workers=min(8, len(selected_versions) or 1)
@@ -285,7 +314,9 @@ def get_quilt_versions(
         if not all([game_response, loader_response, installer_response]):
             return {}
         latest_loader = loader_response.json()[0]["version"]
-        latest_installer = installer_response.json()[0]["version"]
+        installer_data = installer_response.json()[0]
+        latest_installer = installer_data["version"]
+        installer_url = installer_data.get("url")
         versions: dict[str, Any] = {}
         for entry in game_response.json():
             version = entry["version"]
@@ -294,6 +325,7 @@ def get_quilt_versions(
                 versions[version] = {
                     "loader": latest_loader,
                     "installer": latest_installer,
+                    "installer_url": installer_url,
                     "is_snapshot": snapshot,
                 }
         return versions
@@ -364,8 +396,10 @@ def _determine_download(
     session = create_robust_session()
     try:
         if flavor in {"paper", "folia"}:
+            if version_info.get("download_url"):
+                return version_info["download_url"], target_filename
             build = version_info["latest_build"]
-            filename = version_info["download_name"]
+            filename = version_info.get("download_name", f"{flavor}-{version}.jar")
             api_base = SERVER_FLAVORS[flavor]["api_base"]
             return (
                 f"{api_base}/versions/{version}/builds/{build}/downloads/{filename}",
@@ -385,11 +419,13 @@ def _determine_download(
                 target_filename,
             )
         if flavor == "quilt":
-            return (
-                "https://meta.quiltmc.org/v3/versions/loader/"
-                f"{version}/{version_info['loader']}/{version_info['installer']}/server/jar",
-                target_filename,
+            inst_v = version_info["installer"]
+            maven_fallback = (
+                "https://maven.quiltmc.org/repository/release/org/quiltmc/"
+                f"quilt-installer/{inst_v}/quilt-installer-{inst_v}.jar"
             )
+            installer_url = version_info.get("installer_url") or maven_fallback
+            return installer_url, "quilt-installer.jar"
         if flavor == "pocketmine":
             return version_info["download_url"], version_info["filename"]
         raise RuntimeError(f"Unsupported server flavor: {flavor}")

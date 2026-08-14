@@ -88,7 +88,7 @@ SERVER_FLAVORS = {
     "paper": {
         "name": "PaperMC",
         "description": "High-performance server with plugin support",
-        "api_base": "https://api.papermc.io/v2/projects/paper",
+        "api_base": "https://fill.papermc.io/v3/projects/paper",
         "supports_versions": True,
         "supports_snapshots": True,
         "jar_pattern": "paper-{version}-{build}.jar",
@@ -110,7 +110,7 @@ SERVER_FLAVORS = {
     "folia": {
         "name": "Folia",
         "description": "Regionized multi-threaded Paper fork",
-        "api_base": "https://api.papermc.io/v2/projects/folia",
+        "api_base": "https://fill.papermc.io/v3/projects/folia",
         "supports_versions": True,
         "supports_snapshots": False,
         "jar_pattern": "folia-{version}-{build}.jar",
