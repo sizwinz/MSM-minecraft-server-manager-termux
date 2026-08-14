@@ -1,95 +1,104 @@
 <div align="center">
 
-# ⛏️ MSM — Minecraft Server Manager v6.0
+# MSM - Minecraft Server Manager
 
-**Terminal-native server management for Termux and Linux.**  
-Multi-server. Persistent SQLite tracking. Zero-GUI workflow.
+**High-performance, terminal-native Minecraft server management for Termux and Linux.**  
+*Multi-instance isolation &bull; Upstream binary lifecycle &bull; Dual tunnel bridging &bull; SQLite telemetry*
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
-[![Platform](https://img.shields.io/badge/Platform-Termux%20%7C%20Linux-orange?logo=android)](https://termux.dev)
-[![Stars](https://img.shields.io/github/stars/sizwinz/MSM-minecraft-server-manager-termux?style=flat&color=yellow)](https://github.com/sizwinz/MSM-minecraft-server-manager-termux/stargazers)
+<br/>
+
+[![Version](https-//img.shields.io/badge/version-6.0-22c55e?style=flat-square)](core/constants.py) [![Python](https-//img.shields.io/badge/python-3.10+-3b82f6?style=flat-square&logo=python&logoColor=white)](https-//python.org) [![Platform](https-//img.shields.io/badge/platform-Termux_%7C_Linux-f97316?style=flat-square&logo=linux&logoColor=white)](https-//termux.dev) [![License](https-//img.shields.io/badge/license-MIT-64748b?style=flat-square)](LICENSE) [![Code Style](https-//img.shields.io/badge/code%20style-black-000000?style=flat-square)](https-//github.com/psf/black) [![Linter](https-//img.shields.io/badge/linter-flake8-4b5563?style=flat-square)](https-//flake8.pycqa.org)
+
+<br/>
+
+[Quickstart](#quickstart) &bull; [Architecture](#architecture) &bull; [Supported Flavors](#supported-server-flavors) &bull; [Installation](#installation) &bull; [CLI Reference](#cli-reference) &bull; [Core Systems](#core-systems) &bull; [Configuration](#configuration-reference) &bull; [Development](#development)
 
 </div>
 
 ---
 
-## What MSM Is
+## Overview
 
-MSM manages multiple Minecraft server instances from a single TUI. It downloads server binaries from upstream APIs, starts them in isolated `screen` sessions, tracks performance in SQLite, handles world backups with zip-slip-safe extraction, and delivers a full CLI for routine administration — from a phone running Termux or a Linux box.
+MSM is a lightweight, zero-GUI management suite designed to deploy, operate, and supervise Minecraft server instances directly within POSIX terminal environments, from Android mobile devices running Termux to headless Linux distributions and WSL.
 
-**This README reflects the current codebase exactly. Nothing here is aspirational.**
+It orchestrates server binaries directly from upstream vendor APIs, isolates each runtime within dedicated GNU `screen` sessions, captures fine-grained system telemetry into an atomic SQLite database, manages ZIP world backups with Zip-Slip attack mitigation, and provisions public tunnel endpoints via `playit` and `ngrok`.
 
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Supported Server Flavors](#supported-server-flavors)
-- [Requirements](#requirements)
-- [Installation](#installation)
-  - [Quick Install](#quick-install)
-  - [Manual Install (Termux)](#manual-install-termux)
-  - [Manual Install (Debian/Ubuntu/WSL)](#manual-install-debianubuntuwsl)
-- [Basic Workflow](#basic-workflow)
-- [CLI Menu Reference](#cli-menu-reference)
-- [Feature Details](#feature-details)
-  - [Multi-Server Runtime Model](#multi-server-runtime-model)
-  - [Process Management](#process-management)
-  - [Server Startup](#server-startup)
-  - [Monitoring and Statistics](#monitoring-and-statistics)
-  - [Auto-Restart](#auto-restart)
-  - [World Backups](#world-backups)
-  - [Command Delivery](#command-delivery)
-  - [Tunnel Support](#tunnel-support)
-  - [Java Detection](#java-detection)
-  - [Version Selection UI](#version-selection-ui)
-  - [Configuration Management](#configuration-management)
-- [Files and Directories](#files-and-directories)
-- [Configuration Reference](#configuration-reference)
-- [Project Layout](#project-layout)
-- [Security Notes](#security-notes)
-- [Development](#development)
-- [Known Limitations](#known-limitations)
-- [License](#license)
+> [!NOTE]
+> This documentation reflects the v6.0 production codebase. All described architecture, configuration fields, and behavioral characteristics correspond directly to implemented features.
 
 ---
 
-## Features
+## Architecture
 
-**What MSM does:**
+```
+                                +-----------------------------------+
+                                |            msm.py CLI             |
+                                |     (Interactive TUI Menus)       |
+                                +-----------------+-----------------+
+                                                  |
+                                      +-----------v-----------+
+                                      |    RuntimeManager     |
+                                      +-----------+-----------+
+                                                  |
+                        +-------------------------+-------------------------+
+                        |                                                   |
+            +-----------v-----------+                           +-----------v-----------+
+            | ServerInstance ("sv1")|                           | ServerInstance ("sv2")|
+            +-----------+-----------+                           +-----------+-----------+
+                        |                                                   |
+      +-----------------+-----------------+               +-----------------+-----------------+
+      |                 |                 |               |                 |                 |
++-----v-----+     +-----v-----+     +-----v-----+   +-----v-----+     +-----v-----+     +-----v-----+
+|  screen   |     |  Monitor  |     |  Tunnel   |   |  screen   |     |  Monitor  |     |  Tunnel   |
+| (mc_sv1)  |     |  Thread   |     |  Process  |   | (mc_sv2)  |     |  Thread   |     |  Process  |
+| .msm.pid  |     |  (60s)    |     |(playit/   |   | .msm.pid  |     |  (60s)    |     |(playit/   |
++-----------+     +-----+-----+     | ngrok)    |   +-----------+     +-----+-----+     | ngrok)    |
+                        |           +-----------+                           |           +-----------+
+                        |                                                   |
+                        +-------------------------+-------------------------+
+                                                  |
+                                      +-----------v-----------+
+                                      |    DatabaseManager    |
+                                      |  (SQLite in WAL Mode) |
+                                      +-----------+-----------+
+                                                  |
+                                 +----------------v----------------+
+                                 |         ~/.config/msm/          |
+                                 |  - config.json (Atomic swap)    |
+                                 |  - msm.db      (Metrics/Logs)   |
+                                 |  - msm.log     (Rotating log)   |
+                                 +---------------------------------+
+```
 
-- Manage multiple named server definitions from one CLI
-- Download server binaries directly from upstream APIs (PaperMC, Mojang, Fabric, Quilt, GitHub)
-- Start each server in its own `screen` session (`mc_<n>`) with PID tracking via `.msm.pid`
-- Track sessions, crashes, restarts, backups, and CPU/RAM metrics in SQLite with WAL mode
-- Optional per-server auto-restart while MSM is running
-- Manual and scheduled world backups (ZIP/DEFLATE level 6, zip-slip blocked)
-- Edit `server.properties` and `eula.txt` from within the CLI
-- RCON command delivery with `screen -X stuff` fallback
-- `ngrok` and `playit` tunnel management with per-server log files
+---
 
-**What MSM does not do:**
+## Key Features
 
-- Keep backup scheduling or auto-restart alive after the MSM process exits
-- Collect live player counts, TPS, or MSPT (schema columns exist, collection not implemented)
-- Run natively on Windows (`screen` and POSIX behavior are hard dependencies)
+- **Multi-Server Lifecycle** - Manage multiple independent server profiles concurrently with lazy-loaded instance controllers and zero global state collisions.
+- **Direct Upstream Provisioning** - Automated build resolution and streaming downloads from PaperMC, Purpur, Folia, Mojang, Fabric, Quilt, and PocketMine-MP APIs.
+- **Reliable Process Sandboxing** - Background execution via GNU `screen` (`mc_<name>`) with direct shell PID capture (`.msm.pid`) and `psutil` heartbeat validation.
+- **Dual Tunnel Networking** - Native integration with `playit` (API claim exchange + daemon) and `ngrok` (TCP socket endpoint lookup) for public multiplayer without router port forwarding.
+- **Automated Watchdog & Monitoring** - Independent daemon threads collect CPU/RAM metrics every 60 seconds and handle auto-restart recovery upon crash.
+- **Zip-Slip Safe Backups** - DEFLATE level 6 world archives with canonical member destination verification and symlink rejection.
+- **RCON with Shell Fallback** - Source RCON client protocol execution with automated fallback to `screen -X stuff` if RCON is unavailable.
+- **Atomic Configuration Engine** - Deep-merge schema migrations across version updates with `.tmp` write-and-replace atomicity.
 
 ---
 
 ## Supported Server Flavors
 
-| Flavor | Runtime | Default Port | Min RAM | Binary Source |
-|---|---|---|---|---|
-| **PaperMC** | Java | 25565 | 512 MB | PaperMC API — versioned build metadata |
-| **Purpur** | Java | 25565 | 512 MB | Purpur API — latest build per version |
-| **Folia** | Java | 25565 | 1024 MB | PaperMC API (Folia project) |
-| **Vanilla** | Java | 25565 | 512 MB | Mojang version manifest |
-| **Fabric** | Java | 25565 | 768 MB | FabricMC meta — latest loader + installer |
-| **Quilt** | Java | 25565 | 768 MB | QuiltMC meta — latest loader |
-| **PocketMine-MP** | PHP | 19132 | 256 MB | GitHub releases — `.phar` assets |
+| Flavor | Runtime | Default Port | Min RAM | Upstream Binary Source |
+| --- | --- | --- | --- | --- |
+| **PaperMC** | Java | `25565` | 512 MB | PaperMC v2 API ; versioned build artifact |
+| **Purpur** | Java | `25565` | 512 MB | Purpur API ; latest build stream per version |
+| **Folia** | Java | `25565` | 1024 MB | PaperMC v2 API (Folia project builds) |
+| **Vanilla** | Java | `25565` | 512 MB | Mojang Official Version Manifest (Release / Snapshot) |
+| **Fabric** | Java | `25565` | 768 MB | FabricMC Meta ; loader + server installer |
+| **Quilt** | Java | `25565` | 768 MB | QuiltMC Meta ; loader artifact stream |
+| **PocketMine-MP** | PHP | `19132` | 256 MB | GitHub Releases ; official `.phar` release |
 
-Paper, Folia, and Purpur version metadata is fetched concurrently (up to 8 workers, last 20 upstream versions).
+> [!TIP]
+> PaperMC, Folia, and Purpur build metadata queries are executed concurrently across worker pools (up to 8 threads, inspecting the 20 most recent upstream versions).
 
 ---
 
@@ -97,110 +106,79 @@ Paper, Folia, and Purpur version metadata is fetched concurrently (up to 8 worke
 
 ### Runtime Dependencies
 
-| Dependency | Purpose |
-|---|---|
-| Python 3.10+ | MSM runtime |
-| `psutil >= 5.9` | CPU/RAM sampling and PID lifecycle checks |
-| `requests >= 2.31` | HTTP downloads and upstream API calls |
-| `screen` | Server session isolation |
-| Internet access | Binary downloads and version API metadata |
+| Component | Minimum Version | Purpose |
+| --- | --- | --- |
+| **Python** | 3.10+ | Core application execution |
+| **psutil** | 5.9+ | CPU/RAM telemetry sampling and PID verification |
+| **requests** | 2.31+ | API communication and chunked binary streaming |
+| **screen** | Any POSIX | Process session detachment and console interaction |
 
-### Java Version Matrix
+### Java Runtime Matrix
 
-| Minecraft Version | Required Java |
-|---|---|
-| `1.16.x` and older | Java 8 |
-| `1.17` – `1.20.4` | Java 17 |
-| `1.20.5+` | Java 21 |
-
-The installer automates Java 17 and 21 where packages are available. Java 8 is not installed automatically; configure `java_homes.8` manually if you need very old Minecraft versions.
-
-### Optional
-
-| Tool | Purpose |
-|---|---|
-| `ngrok` | TCP tunnel via ngrok |
-| `playit` / `playit-cli` | Tunnel via playit.gg |
-| `php` | PocketMine-MP only |
+| Minecraft Version Range | Target Java Release | Recommended Package |
+| --- | --- | --- |
+| `<= 1.16.5` | Java 8 | `openjdk-8` / Custom `java_homes.8` |
+| `1.17` &ndash; `1.20.4` | Java 17 | `openjdk-17` |
+| `>= 1.20.5` | Java 21 | `openjdk-21` |
 
 ---
 
 ## Installation
 
-### Quick Install
+### Automated Install
+
+Run the official bootstrap script to install system packages, configure runtime virtual environments, and link dependencies-
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sizwinz/MSM-minecraft-server-manager-termux/main/install.sh | bash
+curl -fsSL https-//raw.githubusercontent.com/sizwinz/MSM-minecraft-server-manager-termux/main/install.sh | bash
 ```
 
-The installer supports Termux and Debian/Ubuntu/WSL. It:
+The script automatically detects package managers (`pkg` on Termux, `apt-get` on Debian/Ubuntu/WSL) and installs Java 17, Java 21, Python, `screen`, PHP, and Playit.
 
-- Uses `pkg` on Termux and `apt-get` on Debian/Ubuntu/WSL
-- Installs Python, Git, `screen`, Java 17/21, PHP, and Playit support
-- Reuses the current checkout when run from the repo
-- Otherwise clones to `~/MSM-minecraft-server-manager-termux`
-- Creates `.venv` and installs `requirements.txt`
-- Sets `msm.py` executable
+### Manual Setup
 
-Set `MSM_INSTALL_DIR=/custom/path` before running the script to choose a different install directory.
-
-**After install:**
+<details>
+<summary><strong>Termux (Android)</strong></summary>
 
 ```bash
-cd MSM-minecraft-server-manager-termux
-source .venv/bin/activate
-python msm.py
-```
-
-**MSM data lives at:**
-
-```
-~/.config/msm/
-├── config.json     # server configurations (atomic writes via .tmp -> replace)
-├── msm.db          # SQLite: sessions, metrics, backups, error log
-└── msm.log         # rotating log — 50 MB max, 30-day retention
-```
-
----
-
-### Manual Install (Termux)
-
-```bash
+# 1. Update system repositories and install packages
 pkg update && pkg upgrade -y
 pkg install -y python git screen openjdk-17 openjdk-21 php python-psutil tur-repo playit
 
-git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+# 2. Clone repository
+git clone https-//github.com/sizwinz/MSM-minecraft-server-manager-termux.git
 cd MSM-minecraft-server-manager-termux
 
+# 3. Initialize virtual environment and install requirements
 python -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+# 4. Launch MSM
 python msm.py
 ```
 
----
+</details>
 
-### Manual Install (Debian/Ubuntu/WSL)
-
-Install dependencies:
+<details>
+<summary><strong>Debian / Ubuntu / WSL</strong></summary>
 
 ```bash
+# 1. Install prerequisites and package repositories
 sudo apt-get update
 sudo apt-get install -y git screen python3 python3-pip python3-venv curl gnupg ca-certificates
 sudo apt-get install -y openjdk-17-jre-headless openjdk-21-jre-headless php-cli
-curl -fsSL https://playit-cloud.github.io/ppa/key.gpg -o /tmp/playit.gpg
+
+# 2. Add Playit repository (optional, for Playit tunnels)
+curl -fsSL https-//playit-cloud.github.io/ppa/key.gpg -o /tmp/playit.gpg
 sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg /tmp/playit.gpg
-echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
+echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https-//playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
 sudo apt-get update
 sudo apt-get install -y playit
-```
 
-Then install MSM as your normal user:
-
-```bash
-git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+# 3. Clone and configure MSM
+git clone https-//github.com/sizwinz/MSM-minecraft-server-manager-termux.git
 cd MSM-minecraft-server-manager-termux
 
 python3 -m venv .venv
@@ -208,497 +186,276 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
+# 4. Launch MSM
 python msm.py
 ```
 
----
-
-## Basic Workflow
-
-```
-1. python msm.py          -> launch MSM (checks for screen on startup)
-2. Create server profile  -> name sanitized to [a-zA-Z0-9_.-]
-3. Install binary         -> fetched from upstream API into ~/minecraft-<n>/
-4. Configure server       -> RAM, port, RCON, tunnel, backup interval
-5. Start server           -> spawns in screen session named mc_<n>
-6. Manage live            -> console attach, commands, stats, world backups
-```
+</details>
 
 ---
 
-## CLI Menu Reference
-
-| Action | Description |
-|---|---|
-| Start server | Writes `server.properties` + `eula.txt`, spawns `screen -dmS mc_<n>` |
-| Stop server | Sends `stop` via RCON or `screen -X stuff`; force-quits the screen session if needed |
-| Install / Update server | Prompts flavor + version, streams binary to server directory |
-| Configure server | RAM, port, MOTD, online-mode, RCON, tunnel, backup settings |
-| Edit server.properties | Load/set/delete individual properties; syncs relevant keys back to `config.json` |
-| Edit eula.txt | Toggle EULA acceptance |
-| Attach to console | Runs `screen -r mc_<n>`; detach with Ctrl+A then D |
-| World manager | Manual backup, list, restore (blocked while running), delete |
-| Send command | RCON first, `screen -X stuff` fallback |
-| Statistics | All-time sessions, uptime, crashes, restarts; 24 h RAM/CPU/peak players |
-| Create new server | Sanitizes name, creates profile and server directory |
-| Switch server | Numbered list of configured servers |
-| Exit | Optionally stops all running servers before exit |
-
----
-
-## Feature Details
-
-### Multi-Server Runtime Model
-
-`RuntimeManager` keeps one `ServerInstance` per server name. Instances are lazy-initialized on first access and reused. On startup, `RuntimeManager.__init__` calls `resume_background_services()` for every server whose PID file indicates it is still running.
-
-Each `ServerInstance` owns:
-
-- Its own `screen` session (`mc_<sanitized-name>`)
-- Its own `.msm.pid`, `.msm.session`, `.msm.tunnel.pid` files
-- Its own monitor, auto-restart, and backup daemon threads
-- Its own per-instance `threading.Event` stop signals
-- Its own tunnel `subprocess.Popen` handle and log file handle
-
-No module-level globals hold process or session state.
-
----
-
-### Process Management
-
-MSM builds a shell one-liner to write the real server PID before `exec`:
+## Quickstart
 
 ```bash
-screen -dmS mc_<n> sh -c "echo $$ > .msm.pid; exec java ... -jar server.jar nogui"
+# Activate virtual environment
+source .venv/bin/activate
+
+# Start the interactive management console
+python msm.py
 ```
 
-MSM then polls `.msm.pid` for up to 10 seconds (250 ms intervals) and validates the PID with `psutil.Process.is_running()` before declaring startup successful.
-
-Per-server state files in the server directory:
+### Standard Workflow
 
 ```
-.msm.pid              # Java/PHP process PID (written by the wrapper before exec)
-.msm.session          # MSM session ID — links to SQLite server_sessions.id
-.msm.tunnel.pid       # tunnel agent PID
-.msm.ngrok.log        # ngrok stdout+stderr
-.msm.playit.log       # playit agent stdout+stderr
-.msm.playit.secret    # playit agent secret (written by claim exchange)
+[1] Create Server Profile   ──> Name sanitized to [a-zA-Z0-9_.-]
+[2] Install Binary          ──> Select Flavor & Version (Paper, Purpur, Vanilla, etc.)
+[3] Configure Parameters    ──> Set allocated RAM, port, MOTD, RCON, Tunnel
+[4] Start Instance          ──> Spawns detached screen (mc_<name>) with PID lock
+[5] Console / Administration──> Live console attach, send commands, trigger backups
 ```
 
 ---
 
-### Server Startup
+## CLI Reference
 
-Java servers launch with these JVM flags:
+The interactive TUI provides direct controls for all server lifecycle operations-
 
-```
-java  -Xmx<RAM>M  -Xms<RAM>M
-      -XX:+UseG1GC
-      -XX:+ParallelRefProcEnabled
-      -XX:MaxGCPauseMillis=200
-      -jar server.jar nogui
-```
-
-PocketMine-MP launches as `php PocketMine-MP.phar`.
-
-MSM resolves the server artifact by checking for `server.jar` first, then any `.jar` alphabetically, then `.phar` for PocketMine-MP. `server.properties` and `eula.txt` are rewritten before every start. RCON fields in `server.properties` are injected from the `rcon` block in `config.json`; if RCON is enabled and a password is set, `enable-rcon=true` and `rcon.password` are added automatically.
-
----
-
-### Monitoring and Statistics
-
-Each active server gets a daemon monitor thread that uses `psutil.Process.oneshot()` to batch-read CPU and RAM:
-
-| Metric | Sample rate |
-|---|---|
-| RAM usage % | Every 60 seconds |
-| CPU usage % | Every 60 seconds |
-| Session start / end | On server start / stop events |
-| Crash count | On unexpected exits detected by auto-restart thread |
-| Restart count | On each auto-restart trigger |
-| Backup history | On each completed backup |
-
-Metrics commit to SQLite (`performance_metrics` table) under WAL mode with a 30-second busy timeout. The statistics view aggregates all-time session data plus a 24-hour rolling window for performance metrics.
+| Menu Option | Operation & Details |
+| --- | --- |
+| **Start server** | Synchronizes `server.properties` and `eula.txt`, launches `screen -dmS mc_<name>`, captures PID |
+| **Stop server** | Issues graceful stop via RCON or `screen -X stuff`; terminates screen session on timeout |
+| **Install / Update server** | Interactive version catalog picker; streams binary artifact to `~/minecraft-<name>/` |
+| **Configure server** | RAM bounds, server port, MOTD, online-mode, RCON parameters, tunnel configuration |
+| **Edit server.properties** | In-place key-value configuration editor with synchronization to `config.json` |
+| **Edit eula.txt** | Instant EULA compliance toggle |
+| **Attach to console** | Direct terminal attachment (`screen -r mc_<name>`); detach using `Ctrl+A`, then `D` |
+| **World manager** | On-demand backup creation, archive listing, ZIP restoration (offline only), deletion |
+| **Send command** | Executes server commands via RCON with immediate fallback to `screen -X stuff` |
+| **Statistics** | Session history, cumulative uptime, crash count, 24h rolling CPU/RAM utilization curves |
+| **Create new server** | Registers a new isolated server profile and provisions root directory |
+| **Switch server** | Switch active context among all configured server profiles |
+| **Exit** | Prompts to optionally terminate running server sessions before closing MSM |
 
 ---
 
-### Auto-Restart
+## Core Systems
 
-Controlled per server via `auto_restart: bool`. A separate daemon thread polls independently of the monitor:
+### Process Lifecycle & Session Sandboxing
 
-| Behavior | Value |
-|---|---|
-| Poll interval | 15 seconds |
-| Delay before restart | 5 seconds |
-| Crash / restart counters | Incremented in SQLite per unexpected exit |
-| Session lifecycle | Previous session closed; new session ID written to `.msm.session` |
-
-> **Important:** Auto-restart is tied to the MSM process. Exit MSM and it stops. Servers remain alive in `screen`. Supervision resumes automatically on next launch via `RuntimeManager.resume_running_servers()`.
-
----
-
-### World Backups
-
-Backups are ZIP archives (DEFLATE, compression level 6) stored under `~/minecraft-<server-name>/backups/`.
-
-**World discovery order:**
-
-1. Read `level-name` from `server.properties` (defaults to `world`)
-2. Check for `<level-name>`, `<level-name>_nether`, `<level-name>_the_end`
-3. Fallback: any directory matching `^world(?:[_.-].+)?$` (case-insensitive)
-
-| Behavior | Detail |
-|---|---|
-| Manual backups | Available from world manager at any time |
-| Scheduled backups | Per-server interval; backup thread polls every 30 s; only runs while MSM is alive and server is online |
-| Threading | Offloaded to a worker thread; CLI shows a `\|/-\` spinner |
-| Restore guard | Raises `RuntimeError` if server is currently running |
-| Zip-slip protection | Every archive member path resolved against destination; symlink entries blocked |
-| Disk space check | 500 MB free required before backup or binary install |
-
----
-
-### Command Delivery
-
-MSM tries delivery methods in this order:
-
-| Method | Condition |
-|---|---|
-| RCON | `rcon.enabled = true` AND password is non-empty |
-| `screen -X stuff` | RCON disabled, password absent, or RCON connection/auth failed |
-
-The RCON client is a minimal Source-style implementation (packet types 2 and 3) with a 5-second socket timeout. It covers command execution only, not console streaming. RCON failures log a warning and fall through to `screen` automatically.
-
----
-
-### Tunnel Support
-
-MSM spawns the tunnel as a child process and captures stdout+stderr to `.msm.<provider>.log`.
-
-#### ngrok
-
-```
-ngrok tcp <port> --log stdout
-  -> stdout -> .msm.ngrok.log
-  -> public URL queried from http://127.0.0.1:4040/api/tunnels
-     (20 s timeout, matched by port number)
-```
-
-Store your authtoken via the setup wizard:
+MSM executes servers under isolated GNU `screen` sessions. To eliminate ambiguity in PID resolution, the startup command wraps execution in a subshell-
 
 ```bash
-ngrok config add-authtoken <your-token>
+screen -dmS mc_<name> sh -c "echo $$ > .msm.pid; exec java -Xmx2048M -Xms2048M -XX-+UseG1GC -jar server.jar nogui"
 ```
 
-#### playit
+The runtime verifies process integrity by polling `.msm.pid` up to 10 seconds (250 ms intervals) and confirming active PID status using `psutil.Process.is_running()`.
 
-The setup wizard links the local agent, then can create or update the Playit tunnel through the Playit account API. Agent linking uses:
-
-```
-playit-cli --stdout claim generate
-  -> claim code
-
-playit-cli --stdout claim url <code>
-  -> browser URL for account linking
-
-playit-cli --stdout --secret_path .msm.playit.secret claim exchange <code>
-  -> writes agent secret to .msm.playit.secret
-```
-
-After the agent is linked, MSM shows this Playit authorization page:
+#### State Artifacts (`~/minecraft-<server>/`)
 
 ```
-https://playit.gg/account/setup/wizard/new-account/third-party/third-party-select?partner=other
-```
-
-Open it, choose the third-party/other flow, paste the one-time auth code into MSM, and MSM will call the Playit API to create or update a tunnel for the current server. Java servers are mapped as Minecraft Java over TCP; PocketMine-MP is mapped as Minecraft Bedrock over UDP. The local target defaults to `127.0.0.1:<server-port>`.
-
-If you choose to save the Playit login secret, it is stored locally at:
-
-```
-~/.config/msm/playit_session.json
-```
-
-Once configured, MSM starts the managed agent:
-
-```
-playit-cli --stdout --secret_path .msm.playit.secret start
-```
-
-The agent log is scanned (reverse line order) for `tunnel_address=<endpoint>` or hostname/IP:port patterns matching `*.playit.gg` or `*.ply.gg`. Claim URLs are matched against `https://playit.gg/claim/<token>`.
-
-> If `.msm.playit.secret` does not exist, MSM skips tunnel start and logs a warning. Run the setup wizard first.
-
-MSM validates the tunnel process is still alive 1 second after launch. Immediate exit triggers a log tail dump to aid diagnosis.
-
-**Termux install for playit:**
-
-```bash
-pkg update && pkg upgrade -y
-pkg install -y tur-repo playit
+~/minecraft-<server>/
+├── .msm.pid            # Process PID written before exec
+├── .msm.session        # Active session UUID linking to SQLite
+├── .msm.tunnel.pid     # Active tunnel process PID
+├── .msm.ngrok.log      # ngrok runtime logs
+├── .msm.playit.log     # playit agent runtime logs
+└── .msm.playit.secret  # playit authentication secret
 ```
 
 ---
 
-### Java Detection
+### Telemetry & Persistent Metrics
 
-`get_java_path()` resolves a Java binary in this order:
+A dedicated daemon thread monitors active server instances every 60 seconds using `psutil.Process.oneshot()` for low-overhead CPU and RAM metrics-
 
-1. `java_homes.<major_version>` in `config.json` -> `<path>/bin/java`
-2. `java` on `PATH`
-3. Common JVM base directories, each tried with three naming patterns:
+| Metric | Cadence | Storage Target |
+| --- | --- | --- |
+| **RAM Usage (%)** | 60 seconds | `performance_metrics.memory_percent` |
+| **CPU Usage (%)** | 60 seconds | `performance_metrics.cpu_percent` |
+| **Session Tracking** | On Start / Stop | `server_sessions` (start_time, end_time, clean_exit) |
+| **Crash & Restarts** | On Event | `server_sessions.crash_count`, `restart_count` |
+| **Backup Records** | On Completion | `backup_history` (filename, size_bytes, duration) |
 
-| Pattern | Example |
-|---|---|
-| `openjdk-<ver>/bin/java` | `/usr/lib/jvm/openjdk-21/bin/java` |
-| `java-<ver>-openjdk/bin/java` | `/usr/lib/jvm/java-21-openjdk/bin/java` |
-| `jdk-<ver>/bin/java` | `/usr/lib/jvm/jdk-21/bin/java` |
-
-Base directories: `$JAVA_HOME`, `~/../usr/lib/jvm` (Termux path), `/usr/lib/jvm`, `/usr/lib64/jvm`.
-
-Each candidate runs `java -version` and the major version is parsed from the quoted version string. A mismatch logs both the required and detected versions. Duplicate paths are skipped.
+SQLite operates in **WAL (Write-Ahead Logging)** mode with `synchronous=NORMAL` and a 30,000 ms busy timeout to prevent write contention.
 
 ---
 
-### Version Selection UI
+### World Backup Engine
 
-The version picker supports pagination and snapshot toggling:
+Backups are packaged as DEFLATE compressed ZIP archives (compression level 6) located under `~/minecraft-<server>/backups/`.
 
-```
-15 versions per page
-n -> next page
-p -> previous page
-s -> toggle snapshots on/off
-0 -> cancel
-```
+#### World Path Discovery Order-
 
-Snapshot detection: presence of `snapshot`, `pre`, or `rc` in the version string (case-insensitive), or `"type": "snapshot"` in the Mojang manifest.
+1. `level-name` defined in `server.properties` (defaults to `world`).
+2. Associated dimensions- `<level-name>`, `<level-name>_nether`, `<level-name>_the_end`.
+3. Regex directory discovery- `^world(?-[_.-].+)?$` (case-insensitive).
 
----
-
-### Configuration Management
-
-`ConfigManager` performs a recursive deep merge on every load: `DEFAULT_CONFIG` and `DEFAULT_SERVER_CONFIG` fill in missing keys without touching existing values. New config fields introduced in future versions migrate automatically.
-
-Config writes are atomic: content goes to `config.json.tmp`, then `Path.replace()` swaps it in. A crash mid-write cannot produce a partially-written config. If `config.json` fails JSON parsing, it is backed up as `config.json.bak_<unix_timestamp>` and MSM starts from defaults.
+> [!IMPORTANT]
+> **Zip-Slip & Symlink Defense-** Every extracted archive path is canonicalized and validated to ensure it remains strictly within the server root directory. Symlink entries are rejected to prevent path traversal vulnerabilities. A minimum of 500 MB free disk space is required before creating backups or installing server binaries.
 
 ---
 
-## Files and Directories
+### Dual Tunnel Bridging
 
-### Application Data
+Expose servers to the public internet without router port forwarding or public static IPs.
+
+#### 1. Playit.gg Integration
+
+- Supports Minecraft Java (TCP) and Bedrock / PocketMine-MP (UDP).
+- Interactive setup wizard handles secret generation (`playit claim generate`), account linking URL generation, and one-time secret persistence (`.msm.playit.secret`).
+- Agent logs are parsed in real time to extract established public hostnames (`*.playit.gg`, `*.ply.gg`).
+
+#### 2. Ngrok Integration
+
+- Spawns `ngrok tcp <port> --log stdout`.
+- Queries the local ngrok client API (`http-//127.0.0.1-4040/api/tunnels`) with a 20-second timeout to extract the assigned public TCP endpoint.
+
+---
+
+### Java Runtime Detection
+
+The `get_java_path()` engine automatically selects the appropriate Java binary for the installed Minecraft version using a 3-tier cascade-
 
 ```
-~/.config/msm/
-├── config.json          # atomic writes; deep-merge migrated on every load
-├── msm.db               # server_sessions | performance_metrics
-│                        # backup_history  | error_log
-└── msm.log              # 50 MB size limit, 30-day file retention
+[1] Explicit Path  ──> config.json ["java_homes"]["<version>"]
+[2] System PATH    ──> "java" binary on environment PATH (matches target version)
+[3] Discovery Scan ──> Scans $JAVA_HOME, /usr/lib/jvm, /usr/lib64/jvm, Termux JVM paths
 ```
 
-### Per-Server Directory
-
-```
-~/minecraft-<sanitized-name>/
-├── server.jar           # or *.phar for PocketMine-MP
-├── server.properties    # rewritten before every start
-├── eula.txt             # rewritten before every start
-├── backups/
-│   └── world_backup_YYYYMMDD_HHMMSS.zip
-├── .msm.pid
-├── .msm.session
-├── .msm.tunnel.pid
-├── .msm.ngrok.log
-├── .msm.playit.log
-└── .msm.playit.secret
-```
-
-Server name sanitization strips non-`[a-zA-Z0-9_.-]` characters, collapses consecutive dots, and strips leading/trailing dots and dashes. An empty result falls back to a random 8-character UUID prefix. Screen session name format: `mc_<sanitized-name>`.
+Candidate binaries are verified by parsing output from `java -version` against the required major version.
 
 ---
 
 ## Configuration Reference
 
-MSM creates and migrates `config.json` automatically. Annotated example:
+Configuration files are maintained at `~/.config/msm/config.json`. Schema migrations and missing default fields are automatically resolved via recursive deep merge on startup.
 
 ```json
 {
-  "current_server": "survival",
+  "current_server"- "survival",
 
-  "java_homes": {
-    "17": "/usr/lib/jvm/java-17-openjdk",
-    "21": "/usr/lib/jvm/java-21-openjdk"
+  "java_homes"- {
+    "17"- "/usr/lib/jvm/java-17-openjdk",
+    "21"- "/usr/lib/jvm/java-21-openjdk"
   },
 
-  "tunnel_defaults": {
-    "provider": "ngrok",
-    "binary_path": "ngrok",
-    "autostart": false
+  "tunnel_defaults"- {
+    "provider"- "ngrok",
+    "binary_path"- "ngrok",
+    "autostart"- false
   },
 
-  "servers": {
-    "survival": {
-      "server_flavor": "paper",
-      "server_version": "1.21.1",
-      "eula_accepted": true,
-      "ram_mb": 2048,
-      "auto_restart": true,
+  "servers"- {
+    "survival"- {
+      "server_flavor"- "paper",
+      "server_version"- "1.21.1",
+      "eula_accepted"- true,
+      "ram_mb"- 2048,
+      "auto_restart"- true,
 
-      "backup_settings": {
-        "enabled": true,
-        "interval_hours": 6
+      "backup_settings"- {
+        "enabled"- true,
+        "interval_hours"- 6
       },
 
-      "tunnel": {
-        "enabled": false,
-        "provider": "ngrok",
-        "binary_path": "ngrok",
-        "autostart": false,
-        "playit_tunnel_id": null,
-        "last_endpoint": null
+      "tunnel"- {
+        "enabled"- false,
+        "provider"- "ngrok",
+        "binary_path"- "ngrok",
+        "autostart"- false,
+        "playit_tunnel_id"- null,
+        "last_endpoint"- null
       },
 
-      "rcon": {
-        "enabled": false,
-        "host": "127.0.0.1",
-        "port": 25575,
-        "password": ""
+      "rcon"- {
+        "enabled"- false,
+        "host"- "127.0.0.1",
+        "port"- 25575,
+        "password"- ""
       },
 
-      "server_settings": {
-        "motd": "survival Server",
-        "port": 25565,
-        "max-players": 20,
-        "online-mode": "true",
-        "enable-rcon": "false",
-        "rcon.port": 25575
+      "server_settings"- {
+        "motd"- "survival Server",
+        "port"- 25565,
+        "max-players"- 20,
+        "online-mode"- "true",
+        "enable-rcon"- "false",
+        "rcon.port"- 25575
       }
     }
   }
 }
 ```
 
-`server_settings` keys are written verbatim to `server.properties`. RCON-related properties (`enable-rcon`, `rcon.port`, `rcon.password`) are injected separately from the `rcon` block when RCON is enabled and a password is set.
-
 ---
 
 ## Project Layout
 
 ```
-msm.py              # entrypoint — calls ui.cli.main()
-core/
-  config.py         # ConfigManager: load/save/mutate with deep-merge migration
-  constants.py      # VERSION="6.0", paths, timeouts, SERVER_FLAVORS registry
-  runtime.py        # RuntimeManager: one ServerInstance per configured server
-  server.py         # ServerInstance: lifecycle, threads, backups, tunnels
-db/
-  manager.py        # DatabaseManager: WAL SQLite, sessions/metrics/backups/errors
-ui/
-  cli.py            # all menus, wizards, spinner, connection summary
-  colors.py         # ANSI ColorScheme (C.*); disable_colors() strips all escapes
-utils/
-  archive.py        # create_backup_archive, safe_extract_zip, discover_world_directories
-  logging_utils.py  # EnhancedLogger: rotating file log + colored stdout
-  network.py        # version catalogs, concurrent build fetchers, binary downloads
-  playit_api.py     # Playit account API auth and tunnel create/update helpers
-  properties.py     # load_properties / write_properties for key=value files
-  rcon.py           # RCONClient: Source RCON types 2 and 3, 5 s timeout
-  system.py         # Java detection, sanitize_input, PID helpers, disk/IP utils
-  tunnels.py        # playit command builders and log regex extractors
-tests/
-  test_network.py             # Paper concurrent fetcher, Vanilla snapshot filter
-  test_playit_api.py          # Playit account API request/response helpers
-  test_security_and_java.py   # zip-slip block, Java version matrix, JAVA_HOME edge cases
-  test_tunnels.py             # playit command builders, endpoint/claim URL extraction
+MSM-minecraft-server-manager-termux/
+├── msm.py                    # Application CLI entrypoint
+├── core/
+│   ├── config.py             # ConfigManager with deep-merge atomic migrations
+│   ├── constants.py          # Application constants, defaults, and flavor registry
+│   ├── runtime.py            # RuntimeManager instance controller
+│   └── server.py             # ServerInstance lifecycle, monitors, and threads
+├── db/
+│   └── manager.py            # DatabaseManager (WAL SQLite persistence)
+├── ui/
+│   ├── cli.py                # Terminal menus, wizards, and formatted tables
+│   └── colors.py             # ANSI terminal color scheme
+├── utils/
+│   ├── archive.py            # Backup engine, world discovery, safe extraction
+│   ├── logging_utils.py      # Rotating file logging and formatted console stream
+│   ├── network.py            # Upstream API clients, version fetchers, binary streams
+│   ├── playit_api.py         # Playit account API client and tunnel sync
+│   ├── properties.py         # Java properties file parser and serializer
+│   ├── rcon.py               # Source RCON protocol client implementation
+│   ├── system.py             # Java detection, PID utils, and system diagnostics
+│   └── tunnels.py            # Tunnel process management and endpoint parsers
+└── tests/                    # Pytest test suite
 ```
-
----
-
-## Security Notes
-
-| Area | Implementation |
-|---|---|
-| Session isolation | Per-`ServerInstance` state; no shared globals for PIDs or sessions |
-| PID tracking | `.msm.pid` written by the server process itself; validated via `psutil` |
-| Database | WAL mode, `synchronous=NORMAL`, `busy_timeout=30000 ms`, foreign keys enforced |
-| Archive safety | ZIP member paths resolved against destination; symlink entries rejected |
-| Subprocess | Argument-list calls throughout; `shell=False` enforced everywhere |
-| Java validation | `java -version` parsed; major version matched before launching any server |
-| Path sanitization | Server names constrained to `[a-zA-Z0-9_.-]` before use in paths and screen names |
-| Config atomicity | `config.json.tmp` written then atomically replaced; corruption backs up with timestamp |
 
 ---
 
 ## Development
 
-### Setup
+### Setup Local Environment
 
 ```bash
+# Create and activate virtual environment
 python -m venv .venv
 source .venv/bin/activate
+
+# Upgrade pip and install all runtime + development tools
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-| Package | Version | Role |
-|---|---|---|
-| `psutil` | >= 5.9 | runtime |
-| `requests` | >= 2.31 | runtime |
-| `black` | >= 24.10 | dev |
-| `flake8` | >= 7.1 | dev |
-| `pytest` | >= 8.3 | dev |
+### Quality Assurance & Verification
 
-### Checks (identical to CI)
+Run the comprehensive CI test suite locally before submitting changes-
 
 ```bash
-python -m flake8 --jobs=1 .       # max-line-length=100; excludes .git __pycache__ .venv
+# 1. Lint and style checks (100-character line length limit)
+python -m flake8 --jobs=1 .
+
+# 2. Code formatting verification
 python -m black --check .
+
+# 3. Unit and regression test suite
 python -m pytest
+
+# 4. Bytecode compilation check across all modules
 python -m compileall msm.py core db ui utils tests
 ```
-
-### CI Pipeline
-
-GitHub Actions runs on every push:
-
-```
-flake8      -> style and lint (100-char limit)
-black       -> format enforcement
-pytest      -> unit tests
-compileall  -> bytecode syntax validation across all modules
-```
-
-Test temporaries go to `.test_tmp/` (gitignored; cleaned up per test).
-
-### Implementation Constraints
-
-- Runtime state belongs inside `ServerInstance`. No global process or session variables.
-- New config fields go into `DEFAULT_CONFIG` / `DEFAULT_SERVER_CONFIG` so existing installs migrate via deep merge.
-- All ZIP extraction must use `safe_extract_zip`.
-- All subprocess calls must use argument lists with `shell=False`.
-- User-exposed config changes should go through `ConfigManager.mutate()`.
-
----
-
-## Known Limitations
-
-- **Thread lifetime:** Exiting MSM stops the monitor, auto-restart, and scheduled backup threads. Servers keep running in `screen`. Supervision resumes on next MSM launch.
-- **playit account auth:** Tunnel creation is automated, but Playit still requires a browser-based one-time authorization code before MSM can use the account API.
-- **PocketMine-MP:** Binary download and process start work. The configure/install UI is built around Java server fields; some options are irrelevant for PHP servers.
-- **Live metrics:** TPS, MSPT, and player counts are not collected. The SQLite schema has `tps`, `mspt`, and `player_count` columns, but the monitor loop does not populate them.
-- **Platform:** `screen` and POSIX process behavior are hard dependencies. Unit tests and CI run cross-platform; actual server hosting does not.
-- **HTTP reliability:** `requests` retries 5 times with backoff factor 2 on 429/5xx. Aggressive upstream rate-limiting may still cause install failures on slow connections.
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
----
+This project is licensed under the terms of the [MIT License](LICENSE).
 
 <div align="center">
-
-Made for Termux. Built for control.
-
+<sub>Designed for performance and reliability across Termux and Linux environments.</sub>
 </div>

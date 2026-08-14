@@ -46,6 +46,7 @@ from utils.system import (
     get_server_dir,
     get_system_info,
     read_text_file,
+    remove_file,
     run_command,
     running_on_termux,
     sanitize_input,
@@ -799,7 +800,8 @@ def tunnel_manager_menu(
         if choice == "7":
             confirm = (
                 input(
-                    f"\n{C.YELLOW}Reset tunnel agent and delete saved credentials for {current_server}? (y/N): {C.RESET}"
+                    f"\n{C.YELLOW}Reset tunnel agent and delete saved "
+                    f"credentials for {current_server}? (y/N): {C.RESET}"
                 )
                 .strip()
                 .lower()
