@@ -29,8 +29,8 @@ from db.manager import DatabaseManager
 from ui.colors import C
 from utils.logging_utils import EnhancedLogger
 from utils.network import download_ngrok_binary, get_versions_for_flavor
-from utils.ngrok import diagnose_ngrok
-from utils.playit import diagnose_playit
+from utils.ngrok import diagnose_ngrok, resolve_ngrok_binary
+from utils.playit import diagnose_playit, resolve_playit_binary
 from utils.playit_api import (
     PLAYIT_THIRD_PARTY_AUTH_URL,
     PlayitApiClient,
@@ -363,20 +363,30 @@ def ngrok_setup_wizard(
     instance = runtime.get_instance(current_server)
     config = config_manager.load()
     tunnel = config["servers"][current_server].setdefault("tunnel", {})
-    current_binary = tunnel.get("binary_path") or DEFAULT_TUNNEL_BINARIES["ngrok"]
-    default_binary = resolve_tunnel_binary(current_binary) or current_binary
+
+    stored_provider = tunnel.get("provider")
+    stored_binary = str(tunnel.get("binary_path") or "")
+    if (
+        stored_provider == "ngrok"
+        and stored_binary
+        and "playit" not in Path(stored_binary).name.lower()
+    ):
+        candidate = stored_binary
+    else:
+        candidate = "ngrok"
+
+    resolved_binary = resolve_ngrok_binary(candidate) or resolve_ngrok_binary("ngrok")
 
     print_header(current_server, runtime)
     print(f" {C.BOLD}Ngrok Setup Wizard:{C.RESET} {current_server}\n")
     print_connection_summary(instance)
     print()
 
-    resolved_binary = resolve_tunnel_binary(default_binary)
-    binary_path = default_binary
+    binary_path = resolved_binary or "ngrok"
     if not resolved_binary:
         logger.log(
             "WARNING",
-            f"Ngrok binary '{default_binary}' was not found on this device.",
+            "Ngrok binary was not found on this device.",
         )
         prompt = "Download and install ngrok automatically? (Y/n): "
         if input(prompt).strip().lower() != "n":
@@ -389,11 +399,10 @@ def ngrok_setup_wizard(
             else:
                 logger.log("ERROR", "Auto-installation failed.")
         else:
-            binary_path = (
-                input(f"Enter custom ngrok binary path [{default_binary}]: ").strip()
-                or default_binary
-            )
-            resolved_binary = resolve_tunnel_binary(binary_path)
+            custom_input = input("Enter custom ngrok binary path: ").strip()
+            if custom_input:
+                resolved_binary = resolve_ngrok_binary(custom_input)
+                binary_path = resolved_binary or custom_input
 
     authtoken = input("\nNgrok authtoken (press Enter to keep existing): ").strip()
     if authtoken and resolved_binary:
@@ -416,7 +425,7 @@ def ngrok_setup_wizard(
         config_manager,
         current_server,
         provider="ngrok",
-        binary_path=binary_path,
+        binary_path=str(binary_path),
         enabled=True,
         logger=logger,
     )
@@ -433,25 +442,28 @@ def playit_setup_wizard(
     instance = runtime.get_instance(current_server)
     config = config_manager.load()
     tunnel = config["servers"][current_server].setdefault("tunnel", {})
-    current_binary = tunnel.get("binary_path")
-    if not current_binary or current_binary == DEFAULT_TUNNEL_BINARIES["ngrok"]:
-        current_binary = (
-            resolve_tunnel_binary("playit")
-            or resolve_tunnel_binary(DEFAULT_TUNNEL_BINARIES["playit"])
-            or DEFAULT_TUNNEL_BINARIES["playit"]
-        )
+
+    stored_provider = tunnel.get("provider")
+    stored_binary = str(tunnel.get("binary_path") or "")
+    if (
+        stored_provider == "playit"
+        and stored_binary
+        and "ngrok" not in Path(stored_binary).name.lower()
+    ):
+        candidate = stored_binary
+    else:
+        candidate = "playit"
+
+    resolved_binary = resolve_playit_binary(candidate) or resolve_playit_binary(
+        "playit"
+    )
+    binary_path = resolved_binary or "playit-cli"
 
     print_header(current_server, runtime)
     print(f" {C.BOLD}Playit.gg Fast Setup:{C.RESET} {current_server}\n")
     print_connection_summary(instance)
     print()
 
-    from utils.playit import resolve_playit_binary
-
-    resolved_binary = resolve_playit_binary(
-        str(current_binary)
-    ) or resolve_playit_binary("playit")
-    binary_path = current_binary
     if not resolved_binary:
         logger.log(
             "WARNING",
@@ -477,6 +489,11 @@ def playit_setup_wizard(
                 if resolved_binary:
                     logger.log("SUCCESS", f"Playit installed at {resolved_binary}")
                     binary_path = resolved_binary
+        else:
+            custom_input = input("Enter custom playit binary path: ").strip()
+            if custom_input:
+                resolved_binary = resolve_playit_binary(custom_input)
+                binary_path = resolved_binary or custom_input
 
     if resolved_binary:
         is_daemon = Path(resolved_binary).name == "playitd"

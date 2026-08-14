@@ -44,8 +44,12 @@ def resolve_ngrok_binary(binary_path: str | None = None) -> str | None:
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
-        if Path(candidate).expanduser().exists():
-            return str(Path(candidate).expanduser())
+        expanded = Path(candidate).expanduser()
+        if expanded.exists() and expanded.is_file():
+            return str(expanded)
+        home_candidate = Path.home() / "bin" / candidate
+        if home_candidate.exists() and home_candidate.is_file():
+            return str(home_candidate)
     return None
 
 
