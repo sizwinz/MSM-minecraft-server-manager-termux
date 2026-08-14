@@ -82,6 +82,7 @@ COMMON_JAVA_HOME_BASES = [
     Path("/usr/lib64/jvm"),
     Path("/usr/lib/jvm/java-17-openjdk-amd64"),
     Path("/usr/lib/jvm/java-21-openjdk-amd64"),
+    Path("/usr/lib/jvm/java-25-openjdk-amd64"),
 ]
 
 SERVER_FLAVORS = {

@@ -207,7 +207,7 @@ update_termux_repos() {
 }
 
 install_termux_dependencies() {
-    run pkg install -y python git screen php python-psutil tur-repo playit openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
+    run pkg install -y python git screen php python-psutil tur-repo playit openjdk-25 openjdk-21 openjdk-17 || run pkg install -y openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
 
     if command -v playit >/dev/null 2>&1 && ! command -v playit-cli >/dev/null 2>&1; then
         run ln -sf "$(command -v playit)" "${PREFIX}/bin/playit-cli"
@@ -247,11 +247,12 @@ install_adoptium_java() {
 
 setup_all_java_runtimes() {
     if is_termux; then
-        run pkg install -y openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
+        run pkg install -y openjdk-25 openjdk-21 openjdk-17 || run pkg install -y openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
         return 0
     fi
     install_adoptium_java 17
     install_adoptium_java 21
+    install_adoptium_java 25 || true
 }
 
 install_apt_package_if_available() {

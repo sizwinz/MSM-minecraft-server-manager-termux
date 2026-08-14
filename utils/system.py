@@ -282,6 +282,13 @@ def get_required_java(version: str | None) -> str:
     if not version:
         return "17"
     parts = version.split(".")
+    first_part = parts[0].split("-")[0]
+    if first_part.isdigit():
+        major = int(first_part)
+        if major >= 26:
+            return "25"
+        if major >= 21:
+            return "21"
     if len(parts) > 1 and parts[0] == "1":
         minor = int(parts[1].split("-")[0])
         patch_str = parts[2].split("-")[0] if len(parts) > 2 else ""
@@ -291,8 +298,6 @@ def get_required_java(version: str | None) -> str:
         if minor >= 17:
             return "17"
         return "8"
-    if parts[0].isdigit() and int(parts[0]) >= 21:
-        return "21"
     return "17"
 
 
