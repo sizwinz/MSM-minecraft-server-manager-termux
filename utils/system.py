@@ -279,62 +279,117 @@ def get_java_path(
     mc_version: str | None, config: dict[str, Any], logger=None
 ) -> str | None:
     required_version = get_required_java(mc_version)
-    candidates: list[str] = []
 
-    custom_home = config.get("java_homes", {}).get(required_version)
-    if custom_home:
-        candidates.append(str(Path(custom_home) / "bin" / "java"))
+    def _collect_candidates() -> list[str]:
+        result: list[str] = []
+        custom_home = config.get("java_homes", {}).get(required_version)
+        if custom_home:
+            result.append(str(Path(custom_home) / "bin" / "java"))
 
-    java_on_path = shutil.which("java")
-    if java_on_path:
-        candidates.append(java_on_path)
-
-    for base_path in COMMON_JAVA_HOME_BASES:
-        if not base_path:
-            continue
-        for candidate in (
-            base_path / f"openjdk-{required_version}" / "bin" / "java",
-            base_path / f"java-{required_version}-openjdk" / "bin" / "java",
-            base_path / f"jdk-{required_version}" / "bin" / "java",
+        for name in (
+            f"java-{required_version}",
+            f"java{required_version}",
+            f"jdk-{required_version}",
+            f"jdk{required_version}",
         ):
-            candidates.append(str(candidate))
+            bin_path = shutil.which(name)
+            if bin_path:
+                result.append(bin_path)
 
-    checked: set[str] = set()
-    mismatch_path: str | None = None
-    mismatch_version: str | None = None
-    compatible_path: str | None = None
-    compatible_version: str | None = None
+        java_on_path = shutil.which("java")
+        if java_on_path:
+            result.append(java_on_path)
 
-    for candidate in candidates:
-        if not candidate or candidate in checked:
-            continue
-        checked.add(candidate)
-        if shutil.which(candidate) is None and not Path(candidate).exists():
-            continue
-        actual_version = detect_java_version(candidate, logger=logger)
-        if actual_version == required_version:
-            return candidate
+        for base_path in COMMON_JAVA_HOME_BASES:
+            if not base_path:
+                continue
+            for candidate in (
+                base_path / str(required_version) / "bin" / "java",
+                base_path / f"openjdk-{required_version}" / "bin" / "java",
+                base_path / f"java-{required_version}-openjdk" / "bin" / "java",
+                base_path / f"jdk-{required_version}" / "bin" / "java",
+                base_path / "bin" / "java",
+            ):
+                result.append(str(candidate))
+        return result
 
-        # Allow newer Java versions to satisfy older requirements
-        if actual_version and actual_version.isdigit() and required_version.isdigit():
-            if int(actual_version) >= int(required_version):
-                if not compatible_path or int(actual_version) < int(compatible_version):
-                    compatible_path = candidate
-                    compatible_version = actual_version
+    def _find_best_match(
+        candidates: list[str],
+    ) -> tuple[str | None, str | None, str | None, str | None]:
+        checked: set[str] = set()
+        mismatch_path: str | None = None
+        mismatch_version: str | None = None
+        compatible_path: str | None = None
+        compatible_version: str | None = None
 
-        if actual_version:
-            mismatch_path = candidate
-            mismatch_version = actual_version
+        for candidate in candidates:
+            if not candidate or candidate in checked:
+                continue
+            checked.add(candidate)
+            if shutil.which(candidate) is None and not Path(candidate).exists():
+                continue
+            actual_version = detect_java_version(candidate, logger=logger)
+            if actual_version == required_version:
+                return candidate, None, None, None
 
-    if compatible_path:
-        return compatible_path
+            # Allow newer Java versions to satisfy older requirements
+            if (
+                actual_version
+                and actual_version.isdigit()
+                and required_version.isdigit()
+            ):
+                if int(actual_version) >= int(required_version):
+                    if not compatible_path or int(actual_version) < int(
+                        compatible_version
+                    ):
+                        compatible_path = candidate
+                        compatible_version = actual_version
+
+            if actual_version:
+                mismatch_path = candidate
+                mismatch_version = actual_version
+
+        return (
+            compatible_path,
+            compatible_version,
+            mismatch_path,
+            mismatch_version,
+        )
+
+    candidates = _collect_candidates()
+    match, _match_ver, mismatch_path, mismatch_ver = _find_best_match(candidates)
+    if match:
+        return match
+
+    if running_on_termux():
+        if logger:
+            logger.log(
+                "INFO",
+                f"Attempting to install openjdk-{required_version} via Termux pkg...",
+            )
+        run_command(
+            ["pkg", "install", "-y", "tur-repo"],
+            logger=logger,
+            check=False,
+            capture_output=True,
+        )
+        run_command(
+            ["pkg", "install", "-y", f"openjdk-{required_version}"],
+            logger=logger,
+            check=False,
+            capture_output=True,
+        )
+        candidates = _collect_candidates()
+        match, _match_ver, mismatch_path, mismatch_ver = _find_best_match(candidates)
+        if match:
+            return match
 
     if logger:
         if mismatch_path:
             logger.log(
                 "ERROR",
                 (
-                    f"Java {required_version} is required but {mismatch_version} "
+                    f"Java {required_version} is required but {mismatch_ver} "
                     f"was found at {mismatch_path}"
                 ),
             )

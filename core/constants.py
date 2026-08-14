@@ -69,14 +69,14 @@ TUNNEL_STATUS_WRONG_PROTOCOL = "wrong_protocol"
 TUNNEL_STATUS_NOT_RUNNING = "not_running"
 
 _java_home = os.environ.get("JAVA_HOME")
-# Termux stores its JVM under a path relative to the Termux prefix,
-# not the Linux standard /usr/lib/jvm.  Only add this entry when we are
-# actually inside a Termux environment to avoid confusing path lookups on
-# standard Linux / WSL systems.
+_prefix = os.environ.get("PREFIX", "")
 _termux_jvm = Path("/data/data/com.termux/files/usr/lib/jvm")
+_prefix_jvm = Path(_prefix) / "lib" / "jvm" if _prefix else None
+
 COMMON_JAVA_HOME_BASES = [
     *([Path(_java_home)] if _java_home else []),
-    *([_termux_jvm] if _termux_jvm.exists() else []),
+    *([_prefix_jvm] if _prefix_jvm else []),
+    _termux_jvm,
     Path(os.path.expanduser("~/.config/msm/java")),
     Path("/usr/lib/jvm"),
     Path("/usr/lib64/jvm"),
