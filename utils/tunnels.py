@@ -99,18 +99,11 @@ def build_playit_start_command(
     socket_path: str | Path | None = None,
 ) -> list[str]:
     bin_name = Path(binary_path).name
-    if bin_name == "playitd":
-        command = [str(binary_path)]
-        if secret_path:
-            command.extend(["--secret-path", str(secret_path)])
-        if socket_path:
-            command.extend(["--socket-path", str(socket_path)])
-        return command
-
-    command = [str(binary_path), "--stdout"]
+    command = [str(binary_path)]
     if secret_path:
-        command.extend(["--secret_path", str(secret_path)])
-    command.append("start")
+        command.extend(["--secret-path", str(secret_path)])
+    if socket_path and bin_name == "playitd":
+        command.extend(["--socket-path", str(socket_path)])
     return command
 
 

@@ -52,10 +52,8 @@ def test_build_playit_start_command_uses_secret_path_and_start_subcommand():
         "playit-cli", secret_path=".msm.playit.secret"
     ) == [
         "playit-cli",
-        "--stdout",
-        "--secret_path",
+        "--secret-path",
         ".msm.playit.secret",
-        "start",
     ]
 
 
