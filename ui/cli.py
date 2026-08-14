@@ -52,7 +52,13 @@ from utils.system import (
     sanitize_input,
     write_text_file,
 )
-from utils.tunnels import extract_playit_claim_url
+from utils.tunnels import (
+    build_playit_claim_exchange_command,
+    build_playit_claim_generate_command,
+    build_playit_claim_url_command,
+    extract_last_non_empty_line,
+    extract_playit_claim_url,
+)
 
 
 def pause() -> None:
@@ -532,7 +538,13 @@ def playit_setup_wizard(
         log_path = instance.server_dir / ".msm.playit.log"
         log_handle = log_path.open("w", encoding="utf-8")
 
-        daemon_cmd = [resolved_binary, "--secret-path", str(secret_file)]
+        daemon_cmd = [
+            resolved_binary,
+            "--secret-path",
+            str(secret_file),
+            "--socket-path",
+            str(socket_file),
+        ]
         daemon = subprocess.Popen(
             daemon_cmd,
             cwd=instance.server_dir,
@@ -549,12 +561,58 @@ def playit_setup_wizard(
                 logger.log("ERROR", f"Playit daemon exited: {tail}")
 
             claim_url = None
-            for _ in range(16):
+            for _ in range(6):
                 time.sleep(0.5)
                 tail = read_playit_log_tail(instance.server_dir)
                 claim_url = extract_playit_claim_url(tail)
                 if claim_url:
                     break
+
+            cli_binary = resolved_binary
+            claim_code = None
+            if not claim_url:
+                parent = Path(resolved_binary).parent
+                possible_cli = parent / "playit-cli"
+                if possible_cli.exists():
+                    cli_binary = str(possible_cli)
+                else:
+                    cli_binary = shutil.which("playit-cli") or resolved_binary
+
+                for _ in range(10):
+                    claim_gen = run_command(
+                        build_playit_claim_generate_command(
+                            cli_binary, socket_path=socket_file
+                        ),
+                        logger=logger,
+                        check=False,
+                        capture_output=True,
+                        cwd=instance.server_dir,
+                    )
+                    if claim_gen and claim_gen.stdout:
+                        raw = extract_last_non_empty_line(claim_gen.stdout)
+                        if (
+                            raw
+                            and not raw.startswith("Error")
+                            and not raw.startswith("error")
+                        ):
+                            claim_code = raw.split()[-1]
+                            break
+                    time.sleep(0.5)
+
+                if claim_code:
+                    url_res = run_command(
+                        build_playit_claim_url_command(
+                            cli_binary, claim_code, socket_path=socket_file
+                        ),
+                        logger=logger,
+                        check=False,
+                        capture_output=True,
+                        cwd=instance.server_dir,
+                    )
+                    if url_res and url_res.stdout:
+                        claim_url = extract_playit_claim_url(
+                            url_res.stdout
+                        ) or extract_last_non_empty_line(url_res.stdout)
 
             if claim_url:
                 width = min(get_terminal_width(), 70)
@@ -565,6 +623,8 @@ def playit_setup_wizard(
                 print(
                     f" {C.DIM}Open the URL in your browser and click 'Add Agent'.{C.RESET}"
                 )
+            elif claim_code:
+                logger.log("INFO", f"Claim code: {claim_code}")
             else:
                 tail = read_playit_log_tail(instance.server_dir, line_count=5)
                 logger.log(
@@ -576,6 +636,19 @@ def playit_setup_wizard(
                 "\nPress Enter after approving in browser (or 's' to skip): "
             ).strip()
             if step.lower() != "s":
+                if claim_code:
+                    run_command(
+                        build_playit_claim_exchange_command(
+                            cli_binary,
+                            claim_code,
+                            secret_path=secret_file,
+                            socket_path=socket_file,
+                        ),
+                        logger=logger,
+                        check=False,
+                        capture_output=True,
+                        cwd=instance.server_dir,
+                    )
                 for _ in range(10):
                     if secret_file.exists() and secret_file.stat().st_size > 0:
                         break
