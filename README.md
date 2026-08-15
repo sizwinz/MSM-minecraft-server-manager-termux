@@ -16,6 +16,11 @@
 
 <br/>
 
+<img src="assets/msm.png" alt="MSM Interactive Terminal Interface" width="450" />
+
+<br/>
+<br/>
+
 [Quickstart](#quickstart) •
 [Architecture](#architecture) •
 [Supported Flavors](#supported-server-flavors) •
