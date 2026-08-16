@@ -57,6 +57,8 @@ def run_command(
         command = shlex.split(command)
     exec_env = os.environ.copy()
     if env:
+        exec_env.update(env)
+
     php_lib_dirs: list[str] = []
     for arg in command:
         arg_path = Path(arg)

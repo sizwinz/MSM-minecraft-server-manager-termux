@@ -171,8 +171,32 @@ is_debian_like() {
     command -v apt-get >/dev/null 2>&1
 }
 
+is_arch_like() {
+    command -v pacman >/dev/null 2>&1
+}
+
+is_fedora_like() {
+    command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1
+}
+
+is_alpine_like() {
+    command -v apk >/dev/null 2>&1
+}
+
+is_suse_like() {
+    command -v zypper >/dev/null 2>&1
+}
+
+is_void_like() {
+    command -v xbps-install >/dev/null 2>&1
+}
+
+is_macos() {
+    [ "${MSM_PLATFORM:-}" = "macos" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]
+}
+
 setup_privilege() {
-    if [ "$1" = "termux" ]; then
+    if [ "$1" = "termux" ] || [ "$1" = "macos" ]; then
         SUDO_CMD=()
         return
     fi
@@ -187,12 +211,12 @@ setup_privilege() {
         fi
     elif command -v sudo >/dev/null 2>&1; then
         if [ "${DRY_RUN}" != "1" ] && ! sudo -v 2>/dev/null; then
-            log_error "Root privileges are required for Debian/Ubuntu system packages."
+            log_error "Root privileges are required for system package management."
             exit 1
         fi
         SUDO_CMD=(sudo)
     else
-        log_error "Root privileges are required for Debian/Ubuntu system packages."
+        log_error "Root privileges are required for system package management."
         log_info "Please install 'sudo' or run as root."
         exit 1
     fi
@@ -225,13 +249,17 @@ install_adoptium_java() {
     local arch
     arch=$(uname -m)
     case "${arch}" in
-        x86_64) arch="x64" ;;
-        aarch64) arch="aarch64" ;;
+        x86_64|amd64) arch="x64" ;;
+        aarch64|arm64) arch="aarch64" ;;
         armv7l|armv8l) arch="arm" ;;
         *) log_error "Unsupported architecture: ${arch}"; return 1 ;;
     esac
 
     local os="linux"
+    if [ "${MSM_PLATFORM:-}" = "macos" ] || [ "$(uname -s)" = "Darwin" ]; then
+        os="mac"
+    fi
+
     local download_url="https://api.adoptium.net/v3/binary/latest/${version}/ga/${os}/${arch}/jre/hotspot/normal/eclipse"
     local tmp_tar="${TMPDIR:-/tmp}/java_${version}.tar.gz"
 
@@ -283,6 +311,38 @@ install_debian_dependencies() {
     priv apt-get install -y git screen python3 python3-pip python3-venv curl gnupg ca-certificates
     install_apt_package_if_available php-cli optional
     install_playit_debian
+}
+
+install_arch_dependencies() {
+    priv pacman -S --noconfirm --needed git screen python python-pip curl gnupg
+}
+
+install_fedora_dependencies() {
+    if command -v dnf >/dev/null 2>&1; then
+        priv dnf install -y git screen python3 python3-pip curl gnupg
+    else
+        priv yum install -y git screen python3 python3-pip curl gnupg
+    fi
+}
+
+install_alpine_dependencies() {
+    priv apk add --no-cache git screen python3 py3-pip py3-virtualenv curl gnupg bash tar
+}
+
+install_suse_dependencies() {
+    priv zypper install -y git screen python3 python3-pip curl gpg2 tar
+}
+
+install_void_dependencies() {
+    priv xbps-install -y git screen python3 python3-pip curl gnupg
+}
+
+install_macos_dependencies() {
+    if command -v brew >/dev/null 2>&1; then
+        run brew install git screen python
+    else
+        log_warning "Homebrew is recommended to install dependencies on macOS ('brew install git screen python')."
+    fi
 }
 
 using_current_checkout() {
@@ -356,10 +416,42 @@ main() {
         setup_privilege debian
         run_step 1 5 "Updating package repositories" priv apt-get update -y
         run_step 2 5 "Installing core dependencies (git, screen, playit, python)" install_debian_dependencies
+    elif is_arch_like; then
+        setup_privilege arch
+        run_step 1 5 "Updating package repositories" priv pacman -Sy
+        run_step 2 5 "Installing core dependencies (git, screen, python, curl)" install_arch_dependencies
+    elif is_fedora_like; then
+        setup_privilege fedora
+        if command -v dnf >/dev/null 2>&1; then
+            run_step 1 5 "Updating package repositories" priv dnf check-update || true
+        else
+            run_step 1 5 "Updating package repositories" priv yum check-update || true
+        fi
+        run_step 2 5 "Installing core dependencies (git, screen, python3, curl)" install_fedora_dependencies
+    elif is_alpine_like; then
+        setup_privilege alpine
+        run_step 1 5 "Updating package repositories" priv apk update
+        run_step 2 5 "Installing core dependencies (git, screen, python3, bash)" install_alpine_dependencies
+    elif is_suse_like; then
+        setup_privilege suse
+        run_step 1 5 "Updating package repositories" priv zypper refresh -f
+        run_step 2 5 "Installing core dependencies (git, screen, python3, curl)" install_suse_dependencies
+    elif is_void_like; then
+        setup_privilege void
+        run_step 1 5 "Updating package repositories" priv xbps-install -S
+        run_step 2 5 "Installing core dependencies (git, screen, python3, curl)" install_void_dependencies
+    elif is_macos; then
+        setup_privilege macos
+        if command -v brew >/dev/null 2>&1; then
+            run_step 1 5 "Updating Homebrew" brew update
+            run_step 2 5 "Installing core dependencies (git, screen, python)" install_macos_dependencies
+        else
+            run_step 1 5 "Checking environment" true
+            run_step 2 5 "Installing core dependencies (manual/brew)" install_macos_dependencies
+        fi
     else
-        log_error "Only Termux and Debian/Ubuntu/WSL are supported by this installer."
-        log_info "Install python, git, screen, Java 17/21, php, and playit manually, then run MSM."
-        exit 1
+        log_warning "Unsupported or unrecognized distribution."
+        log_info "Attempting installation with existing system tools..."
     fi
 
     run_step 3 5 "Setting up Java runtimes (Adoptium 17 & 21)" setup_all_java_runtimes

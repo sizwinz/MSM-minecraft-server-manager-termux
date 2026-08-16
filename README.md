@@ -1,6 +1,6 @@
 <div align="center">
 
-# MSM — Minecraft Server Manager
+# MSM - Minecraft Server Manager
 
 **High-performance, terminal-native Minecraft server management for Termux and Linux.**  
 *Multi-instance isolation • Upstream binary lifecycle • Dual tunnel bridging • SQLite telemetry*
@@ -36,7 +36,7 @@
 
 ## Overview
 
-MSM is a lightweight, zero-GUI management suite designed to deploy, operate, and supervise Minecraft server instances directly within POSIX terminal environments — from Android mobile devices running Termux to headless Linux distributions and WSL.
+MSM is a lightweight, zero-GUI management suite designed to deploy, operate, and supervise Minecraft server instances directly within POSIX terminal environments, from Android mobile devices running Termux to headless Linux distributions and WSL.
 
 It orchestrates server binaries directly from upstream vendor APIs, isolates each runtime within dedicated GNU `screen` sessions, captures fine-grained system telemetry into an atomic SQLite database, manages ZIP world backups with Zip-Slip attack mitigation, and provisions public tunnel endpoints via `playit` and `ngrok`.
 
@@ -106,13 +106,13 @@ It orchestrates server binaries directly from upstream vendor APIs, isolates eac
 
 | Flavor | Runtime | Default Port | Min RAM | Upstream Binary Source |
 |---|---|---|---|---|
-| **PaperMC** | Java | `25565` | 512 MB | PaperMC v2 API — versioned build artifact |
-| **Purpur** | Java | `25565` | 512 MB | Purpur API — latest build stream per version |
+| **PaperMC** | Java | `25565` | 512 MB | PaperMC v2 API: versioned build artifact |
+| **Purpur** | Java | `25565` | 512 MB | Purpur API: latest build stream per version |
 | **Folia** | Java | `25565` | 1024 MB | PaperMC v2 API (Folia project builds) |
 | **Vanilla** | Java | `25565` | 512 MB | Mojang Official Version Manifest (Release / Snapshot) |
-| **Fabric** | Java | `25565` | 768 MB | FabricMC Meta — loader + server installer |
-| **Quilt** | Java | `25565` | 768 MB | QuiltMC Meta — loader artifact stream |
-| **PocketMine-MP** | PHP | `19132` | 256 MB | GitHub Releases — official `.phar` release |
+| **Fabric** | Java | `25565` | 768 MB | FabricMC Meta: loader + server installer |
+| **Quilt** | Java | `25565` | 768 MB | QuiltMC Meta: loader artifact stream |
+| **PocketMine-MP** | PHP | `19132` | 256 MB | GitHub Releases: official `.phar` release |
 
 > [!TIP]
 > PaperMC, Folia, and Purpur build metadata queries are executed concurrently across worker pools (up to 8 threads, inspecting the 20 most recent upstream versions).
@@ -135,7 +135,7 @@ It orchestrates server binaries directly from upstream vendor APIs, isolates eac
 | Minecraft Version Range | Target Java Release | Recommended Package |
 |---|---|---|
 | `<= 1.16.5` | Java 8 | `openjdk-8` / Custom `java_homes.8` |
-| `1.17` – `1.20.4` | Java 17 | `openjdk-17` |
+| `1.17` to `1.20.4` | Java 17 | `openjdk-17` |
 | `>= 1.20.5` | Java 21 | `openjdk-21` |
 
 ---
@@ -144,21 +144,30 @@ It orchestrates server binaries directly from upstream vendor APIs, isolates eac
 
 ### Automated Install
 
-Run the official bootstrap script to install system packages, configure runtime virtual environments, and link dependencies:
+#### Linux, macOS, and Termux (Android)
+Run the bootstrap script to automatically detect your package manager (`pkg`, `apt-get`, `pacman`, `dnf`, `apk`, `zypper`, `brew`), configure dependencies, set up Java 17/21, and initialize the virtual environment:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sizwinz/MSM-minecraft-server-manager-termux/main/install.sh | bash
 ```
 
-The script automatically detects package managers (`pkg` on Termux, `apt-get` on Debian/Ubuntu/WSL) and installs Java 17, Java 21, Python, `screen`, PHP, and Playit.
+#### Windows (PowerShell)
+Open PowerShell and run:
 
-### Manual Setup
+```powershell
+irm https://raw.githubusercontent.com/sizwinz/MSM-minecraft-server-manager-termux/main/install.ps1 | iex
+```
+*(Or clone the repository and run `powershell -ExecutionPolicy Bypass -File install.ps1`)*
+
+---
+
+### Manual Setup by Platform
 
 <details>
 <summary><strong>Termux (Android)</strong></summary>
 
 ```bash
-# 1. Update system repositories and install packages
+# 1. Update repositories and install dependencies
 pkg update && pkg upgrade -y
 pkg install -y python git screen openjdk-17 openjdk-21 php python-psutil tur-repo playit
 
@@ -178,22 +187,14 @@ python msm.py
 </details>
 
 <details>
-<summary><strong>Debian / Ubuntu / WSL</strong></summary>
+<summary><strong>Debian / Ubuntu / Linux Mint / WSL</strong></summary>
 
 ```bash
-# 1. Install prerequisites and package repositories
+# 1. Install prerequisites
 sudo apt-get update
 sudo apt-get install -y git screen python3 python3-pip python3-venv curl gnupg ca-certificates
-sudo apt-get install -y openjdk-17-jre-headless openjdk-21-jre-headless php-cli
 
-# 2. Add Playit repository (optional, for Playit tunnels)
-curl -fsSL https://playit-cloud.github.io/ppa/key.gpg -o /tmp/playit.gpg
-sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg /tmp/playit.gpg
-echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
-sudo apt-get update
-sudo apt-get install -y playit
-
-# 3. Clone and configure MSM
+# 2. Clone and configure MSM
 git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
 cd MSM-minecraft-server-manager-termux
 
@@ -202,7 +203,89 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
-# 4. Launch MSM
+# 3. Launch MSM
+python msm.py
+```
+</details>
+
+<details>
+<summary><strong>Arch Linux / Manjaro / EndeavourOS</strong></summary>
+
+```bash
+# 1. Install dependencies
+sudo pacman -S --needed git screen python python-pip curl gnupg
+
+# 2. Clone and configure MSM
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+cd MSM-minecraft-server-manager-termux
+
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 3. Launch MSM
+python msm.py
+```
+</details>
+
+<details>
+<summary><strong>Fedora / RHEL / Rocky / AlmaLinux</strong></summary>
+
+```bash
+# 1. Install dependencies
+sudo dnf install -y git screen python3 python3-pip curl gnupg
+
+# 2. Clone and configure MSM
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+cd MSM-minecraft-server-manager-termux
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 3. Launch MSM
+python msm.py
+```
+</details>
+
+<details>
+<summary><strong>macOS (Apple Silicon & Intel)</strong></summary>
+
+```bash
+# 1. Install dependencies via Homebrew
+brew install git screen python
+
+# 2. Clone and configure MSM
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+cd MSM-minecraft-server-manager-termux
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 3. Launch MSM
+python3 msm.py
+```
+</details>
+
+<details>
+<summary><strong>Windows (PowerShell / Command Prompt)</strong></summary>
+
+```powershell
+# 1. Clone repository
+git clone https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git
+cd MSM-minecraft-server-manager-termux
+
+# 2. Initialize virtual environment and install requirements
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+# 3. Launch MSM
 python msm.py
 ```
 </details>
