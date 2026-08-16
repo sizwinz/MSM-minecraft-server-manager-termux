@@ -1,4 +1,4 @@
-"""Structured logging with terminal output."""
+"""Structured logging with terminal output and configurable verbosity."""
 
 from __future__ import annotations
 
@@ -19,11 +19,30 @@ class EnhancedLogger:
         log_file: str | os.PathLike[str],
         max_size: int = 50 * 1024 * 1024,
         retention_days: int = 30,
+        show_debug: bool = False,
     ):
         self.log_file = Path(log_file)
         self.max_size = max_size
         self.retention_days = retention_days
+        self.show_debug = show_debug or os.environ.get("MSM_DEBUG", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._setup_logging()
+
+    def set_debug(self, enabled: bool) -> None:
+        """Enable or disable printing DEBUG messages to terminal stdout."""
+        self.show_debug = enabled
+
+    def toggle_debug(self) -> bool:
+        """Toggle terminal DEBUG message visibility and return new state."""
+        self.show_debug = not self.show_debug
+        return self.show_debug
+
+    def is_debug_enabled(self) -> bool:
+        """Return True if DEBUG messages are configured to print to terminal."""
+        return self.show_debug
 
     def _setup_logging(self) -> None:
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +73,14 @@ class EnhancedLogger:
                 file.unlink(missing_ok=True)
 
     def log(self, level: str, message: str, **kwargs: object) -> None:
+        normalized_level = level.upper()
+        payload = f"{message} | {kwargs}" if kwargs else message
+        self.logger.log(getattr(logging, normalized_level, logging.INFO), payload)
+
+        # Silent DEBUG messages on terminal unless explicitly toggled on
+        if normalized_level == "DEBUG" and not self.show_debug:
+            return
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         color_map = {
             "DEBUG": C.DIM,
@@ -63,12 +90,9 @@ class EnhancedLogger:
             "ERROR": C.RED,
             "CRITICAL": C.BG_RED + C.WHITE,
         }
-        normalized_level = level.upper()
         color = color_map.get(normalized_level, C.RESET)
         suffix = f" {C.DIM}{kwargs}{C.RESET}" if kwargs else ""
         print(
             f"{C.DIM}[{timestamp}]{C.RESET} "
             f"{color}[{normalized_level:>8s}]{C.RESET} {message}{suffix}"
         )
-        payload = f"{message} | {kwargs}" if kwargs else message
-        self.logger.log(getattr(logging, normalized_level, logging.INFO), payload)

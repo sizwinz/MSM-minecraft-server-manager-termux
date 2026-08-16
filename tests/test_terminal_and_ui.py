@@ -109,3 +109,28 @@ def test_startup_server_picker_selection(
     captured = capsys.readouterr().out
     assert "Select Server to Manage" in captured
     assert "Directory:" in captured
+
+
+def test_debug_logging_silenced_by_default_and_toggleable(tmp_path: Path, capsys):
+    logger = EnhancedLogger(tmp_path / "msm.log")
+
+    # 1. By default, DEBUG log is written to file but NOT printed to terminal
+    logger.log("DEBUG", "Hidden debug trace message")
+    captured = capsys.readouterr().out
+    assert "Hidden debug trace message" not in captured
+
+    # INFO / SUCCESS / WARNING should still print
+    logger.log("INFO", "Visible info message")
+    captured_info = capsys.readouterr().out
+    assert "Visible info message" in captured_info
+
+    # 2. When debug is toggled ON, DEBUG log is printed to terminal
+    logger.set_debug(True)
+    logger.log("DEBUG", "Visible debug trace message")
+    captured_dbg = capsys.readouterr().out
+    assert "Visible debug trace message" in captured_dbg
+
+    # 3. toggle_debug flips state
+    new_state = logger.toggle_debug()
+    assert new_state is False
+    assert logger.is_debug_enabled() is False

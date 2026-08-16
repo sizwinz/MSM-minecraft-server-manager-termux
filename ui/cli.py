@@ -1602,17 +1602,28 @@ def show_platform_diagnostics(
 
     print(f"\n  {C.BOLD}Storage & Paths:{C.RESET}")
     print(f"    Config Dir : {path_service.config_dir}")
-    print(f"    Data Dir   : {path_service.data_dir}")
-    print(f"    Servers Dir: {path_service.servers_dir}")
-    print(f"    Logs Dir   : {path_service.logs_dir}")
+    dbg_status = (
+        f"{C.GREEN}ENABLED (verbose){C.RESET}"
+        if logger.is_debug_enabled()
+        else f"{C.DIM}DISABLED (silent){C.RESET}"
+    )
+    print(f"\n  {C.BOLD}Logging & Verbosity:{C.RESET}")
+    print(f"    Terminal DEBUG Logs: {dbg_status}")
+    print(f"    Full Log File      : {path_service.log_file}")
 
     if caps.notes:
         print(f"\n  {C.BOLD}Diagnostic Notes:{C.RESET}")
         for note in caps.notes:
             print(f"    • {note}")
 
-    print()
-    pause()
+    print("\n  [ t] Toggle Terminal DEBUG logs")
+    print("  [Enter] Continue")
+    act = input(f"\n{C.BOLD}Action: {C.RESET}").strip().lower()
+    if act in ("t", "toggle"):
+        new_state = logger.toggle_debug()
+        new_text = "ENABLED" if new_state else "DISABLED (silent)"
+        logger.log("SUCCESS", f"Terminal DEBUG output is now {new_text}.")
+        pause()
 
 
 def view_live_console(
@@ -1866,6 +1877,8 @@ def main() -> None:
         return
 
     logger, config_manager, db_manager, runtime = create_services()
+    if "--debug" in sys.argv or "-v" in sys.argv:
+        logger.set_debug(True)
     if not check_base_dependencies(logger):
         raise SystemExit(1)
 
