@@ -56,6 +56,7 @@ from utils.system import (
     format_bytes,
     get_java_path,
     get_local_ipv4_addresses,
+    get_php_path,
     get_screen_name,
     get_server_dir,
     is_pid_running,
@@ -297,7 +298,23 @@ class ServerInstance:
                 artifact,
                 "nogui",
             ]
-        return ["php", artifact]
+
+        php_binary = get_php_path(
+            config,
+            self.server_dir,
+            auto_install=True,
+            logger=self.logger,
+        )
+        if not php_binary:
+            raise RuntimeError(
+                "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located."
+            )
+        return [
+            php_binary,
+            f"-dmemory_limit={ram_mb}M",
+            artifact,
+            "--no-wizard",
+        ]
 
     def apply_server_files(self) -> None:
         self.ensure_server_files()
@@ -309,6 +326,18 @@ class ServerInstance:
                 for key, value in server_config.get("server_settings", {}).items()
             }
         )
+
+        flavor = server_config.get("server_flavor")
+        port = int(
+            server_config.get("server_settings", {}).get(
+                "port",
+                SERVER_FLAVORS.get(flavor or "", {}).get("default_port", 25565),
+            )
+        )
+        if flavor == "pocketmine":
+            properties["server-port"] = str(port)
+            properties["server-portv4"] = str(port)
+            properties["server-portv6"] = str(port + 1)
 
         rcon_config = server_config.get("rcon", {})
         if rcon_config.get("enabled"):
@@ -342,7 +371,7 @@ class ServerInstance:
             for key in ["motd", "online-mode"]:
                 if key in properties:
                     settings[key] = str(properties[key])
-            for key in ["port", "max-players", "rcon.port"]:
+            for key in ["port", "max-players", "rcon.port", "server-port"]:
                 if key in properties:
                     try:
                         numeric = int(str(properties[key]))
@@ -351,6 +380,9 @@ class ServerInstance:
                     if key == "rcon.port":
                         server_config.setdefault("rcon", {})["port"] = numeric
                         settings[key] = numeric
+                    elif key == "server-port":
+                        settings["port"] = numeric
+                        settings["server-port"] = numeric
                     else:
                         settings[key] = numeric
             if "enable-rcon" in properties:
@@ -435,6 +467,16 @@ class ServerInstance:
         )
         if SERVER_FLAVORS[flavor]["type"] == "java":
             self.set_eula(True)
+        elif SERVER_FLAVORS[flavor]["type"] == "php":
+            config, _ = self.refresh_config()
+            php_path = get_php_path(
+                config,
+                self.server_dir,
+                auto_install=True,
+                logger=self.logger,
+            )
+            if php_path and self.logger:
+                self.logger.log("SUCCESS", f"PocketMine PHP runtime ready: {php_path}")
         return artifact
 
     def start(self) -> bool:

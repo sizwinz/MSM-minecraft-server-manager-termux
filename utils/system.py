@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -20,9 +21,11 @@ from core.constants import (
     ALLOWED_FILENAME_CHARS,
     COLLAPSE_DOTS_PATTERN,
     COMMON_JAVA_HOME_BASES,
+    COMMON_PHP_BASES,
     INVALID_FILENAME_CHARS,
     MAX_FILENAME_LENGTH,
     MAX_RAM_PERCENTAGE,
+    PHP_DIR,
 )
 
 
@@ -420,6 +423,158 @@ def get_java_path(
     return None
 
 
+def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
+    """Inspect a PHP binary for version, ZTS support, and PocketMine compatibility."""
+    bin_path = str(php_binary)
+    if not shutil.which(bin_path) and not Path(bin_path).exists():
+        return {
+            "exists": False,
+            "version": None,
+            "zts": False,
+            "has_pmmpthread": False,
+            "has_yaml": False,
+            "compatible": False,
+        }
+
+    result = run_command(
+        [bin_path, "-v"], logger=logger, check=False, capture_output=True
+    )
+    if not result or result.stdout is None:
+        return {
+            "exists": False,
+            "version": None,
+            "zts": False,
+            "has_pmmpthread": False,
+            "has_yaml": False,
+            "compatible": False,
+        }
+
+    output = result.stdout
+    is_zts = bool(
+        re.search(r"\bZTS\b", output)
+        or "( zts" in output.lower()
+        or "thread safety => enabled" in output.lower()
+    )
+
+    version_str = None
+    tokens = output.split()
+    if len(tokens) > 1 and tokens[0].lower() == "php":
+        version_str = tokens[1]
+
+    modules_res = run_command(
+        [bin_path, "-m"], logger=logger, check=False, capture_output=True
+    )
+    modules_set = set()
+    if modules_res and modules_res.stdout:
+        modules_set = {
+            m.strip().lower() for m in modules_res.stdout.splitlines() if m.strip()
+        }
+
+    has_pmmpthread = bool({"pmmpthread", "pthreads"} & modules_set)
+    has_yaml = "yaml" in modules_set
+
+    # Compatible if ZTS or pmmpthread/pthreads module is present
+    compatible = is_zts or has_pmmpthread
+    return {
+        "exists": True,
+        "version": version_str,
+        "zts": is_zts,
+        "has_pmmpthread": has_pmmpthread,
+        "has_yaml": has_yaml,
+        "compatible": compatible,
+    }
+
+
+def get_php_path(
+    config: dict[str, Any] | None = None,
+    server_dir: str | Path | None = None,
+    auto_install: bool = True,
+    logger=None,
+) -> str | None:
+    """Resolve a compatible PHP binary for PocketMine-MP."""
+    cfg = config or {}
+
+    # 1. Custom configured php_path in config
+    custom_php = cfg.get("php_path")
+    if custom_php:
+        custom_path = Path(custom_php)
+        if custom_path.exists() or shutil.which(custom_php):
+            return str(custom_path)
+
+    # 2. Server directory local binaries
+    if server_dir:
+        s_dir = Path(server_dir)
+        for rel in (
+            Path("bin/php7/bin/php"),
+            Path("bin/php/bin/php"),
+            Path("bin/php"),
+            Path("php"),
+            Path("bin/php.exe"),
+            Path("php.exe"),
+        ):
+            candidate = s_dir / rel
+            if candidate.is_file():
+                return str(candidate)
+
+    # 3. Global MSM PHP directory (~/.config/msm/php) and COMMON_PHP_BASES
+    for base in COMMON_PHP_BASES:
+        if not base or not base.exists():
+            continue
+        for rel in (
+            Path("bin/php7/bin/php"),
+            Path("bin/php/bin/php"),
+            Path("bin/php"),
+            Path("php"),
+            Path("bin/php.exe"),
+            Path("php.exe"),
+        ):
+            candidate = base / rel
+            if candidate.is_file():
+                return str(candidate)
+
+    # 4. System PHP on PATH (verify compatibility)
+    system_php = shutil.which("php")
+    if system_php:
+        info = detect_php_runtime(system_php, logger=logger)
+        if info["compatible"]:
+            return system_php
+
+    # 5. Auto-install from PMMP prebuilt binaries if enabled
+    if auto_install:
+        if logger:
+            logger.log(
+                "INFO",
+                "PocketMine-compatible PHP binary not found. "
+                "Attempting automated download from pmmp/PHP-Binaries...",
+            )
+        try:
+            from utils.network import download_php_binary
+
+            installed_php = download_php_binary(PHP_DIR, logger=logger)
+            if installed_php and installed_php.exists():
+                return str(installed_php)
+        except Exception as exc:
+            if logger:
+                logger.log("WARNING", f"Auto-download of PHP binary failed: {exc}")
+
+    # 6. Fallback to system PHP with warning if available
+    if system_php:
+        if logger:
+            logger.log(
+                "WARNING",
+                "Using system PHP binary. If PocketMine fails to start, "
+                "install the official PMMP PHP binary compiled with ZTS and pmmpthread.",
+            )
+        return system_php
+
+    if logger:
+        logger.log(
+            "ERROR",
+            "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located.",
+        )
+    return None
+
+
 def running_on_termux() -> bool:
     prefix = os.environ.get("PREFIX", "")
     return "termux" in prefix.lower() or Path("/data/data/com.termux").exists()
@@ -448,6 +603,17 @@ def check_base_dependencies(logger) -> bool:
                 "No Java runtime is currently on PATH. Java servers will need a "
                 "configured java_homes entry."
             ),
+        )
+    if (
+        shutil.which("php") is None
+        and not (PHP_DIR / "bin/php7/bin/php").exists()
+        and not (PHP_DIR / "bin/php/bin/php").exists()
+        and not (PHP_DIR / "bin/php").exists()
+    ):
+        logger.log(
+            "INFO",
+            "No PHP binary found. PocketMine servers will download a "
+            "compatible runtime automatically on demand.",
         )
     return True
 

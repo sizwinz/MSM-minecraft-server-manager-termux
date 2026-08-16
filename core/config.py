@@ -14,6 +14,7 @@ from core.constants import DEFAULT_BACKUP_INTERVAL_HOURS
 DEFAULT_CONFIG = {
     "current_server": None,
     "java_homes": {},
+    "php_path": None,
     "tunnel_defaults": {
         "provider": "playit",
         "binary_path": "playit-cli",
@@ -29,6 +30,7 @@ DEFAULT_SERVER_CONFIG = {
     "server_version": None,
     "eula_accepted": True,
     "ram_mb": 2048,
+    "php_path": None,
     "auto_restart": False,
     "backup_settings": {
         "enabled": False,

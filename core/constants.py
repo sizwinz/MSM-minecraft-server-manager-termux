@@ -85,6 +85,16 @@ COMMON_JAVA_HOME_BASES = [
     Path("/usr/lib/jvm/java-25-openjdk-amd64"),
 ]
 
+PHP_BINARIES_API = "https://api.github.com/repos/pmmp/PHP-Binaries/releases"
+PHP_DIR = CONFIG_DIR / "php"
+COMMON_PHP_BASES = [
+    PHP_DIR,
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
+    Path("/data/data/com.termux/files/usr/bin"),
+]
+
+
 SERVER_FLAVORS = {
     "paper": {
         "name": "PaperMC",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -66,4 +67,24 @@ def safe_extract_zip(zip_path: str | Path, destination_dir: str | Path) -> None:
             unix_mode = member.external_attr >> 16
             if stat.S_ISLNK(unix_mode):
                 raise ValueError(f"Blocked symlink in archive: {member.filename}")
+        archive.extractall(destination)
+
+
+def safe_extract_tar(tar_path: str | Path, destination_dir: str | Path) -> None:
+    destination = Path(destination_dir).resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "r:*") as archive:
+        for member in archive.getmembers():
+            member_path = destination / member.name
+            resolved_path = member_path.resolve(strict=False)
+            if os.path.commonpath([destination, resolved_path]) != str(destination):
+                raise ValueError(f"Blocked unsafe archive member: {member.name}")
+            if member.islnk() or member.issym():
+                target_path = (member_path.parent / member.linkname).resolve(
+                    strict=False
+                )
+                if os.path.commonpath([destination, target_path]) != str(destination):
+                    raise ValueError(
+                        f"Blocked unsafe link in archive: {member.name} -> {member.linkname}"
+                    )
         archive.extractall(destination)

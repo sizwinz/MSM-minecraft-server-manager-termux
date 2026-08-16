@@ -15,6 +15,8 @@ from core.constants import (
     MAX_RETRIES,
     NGROK_TIMEOUT,
     PAPER_VERSION_LOOKBACK,
+    PHP_BINARIES_API,
+    PHP_DIR,
     REQUEST_TIMEOUT,
     RETRY_BACKOFF,
     SERVER_FLAVORS,
@@ -539,6 +541,185 @@ def download_ngrok_binary(logger=None) -> Path | None:
     except Exception as exc:
         if logger:
             logger.log("ERROR", f"Failed to download ngrok: {exc}")
+        return None
+    finally:
+        session.close()
+
+
+def get_system_arch_and_os() -> tuple[str, str]:
+    import platform
+    import sys
+    from utils.system import running_on_termux
+
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64", "armv8", "armv8l"):
+        arch = "arm64"
+    elif machine in ("x86_64", "amd64"):
+        arch = "x86_64"
+    elif machine in ("armv7l", "armv7", "armhf", "arm"):
+        arch = "arm"
+    elif machine in ("x86", "i386", "i686"):
+        arch = "x86"
+    else:
+        arch = machine
+
+    if (
+        running_on_termux()
+        or "android" in sys.platform.lower()
+        or Path("/data/data/com.termux").exists()
+    ):
+        os_name = "Android"
+    elif sys.platform.startswith("linux"):
+        os_name = "Linux"
+    elif sys.platform.startswith("darwin"):
+        os_name = "MacOS"
+    elif sys.platform.startswith("win"):
+        os_name = "Windows"
+    else:
+        os_name = sys.platform
+    return os_name, arch
+
+
+def download_php_binary(
+    target_dir: str | Path | None = None,
+    logger=None,
+) -> Path | None:
+    from utils.archive import safe_extract_tar, safe_extract_zip
+
+    dest_dir = Path(target_dir) if target_dir else PHP_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    os_name, arch = get_system_arch_and_os()
+    session = create_robust_session()
+    try:
+        response = safe_request(session, "GET", PHP_BINARIES_API, logger=logger)
+        if not response:
+            if logger:
+                logger.log("ERROR", "Failed to query PocketMine PHP binary releases.")
+            return None
+
+        releases = response.json()
+        if not isinstance(releases, list):
+            return None
+
+        matched_asset = None
+        for release in releases:
+            if release.get("draft"):
+                continue
+            for asset in release.get("assets", []):
+                name = asset.get("name", "")
+                name_lower = name.lower()
+                if (
+                    name_lower.startswith("z-")
+                    or "debug" in name_lower
+                    or "symbols" in name_lower
+                ):
+                    continue
+
+                if os_name == "Android" and arch == "arm64":
+                    if "android" in name_lower and (
+                        "arm64" in name_lower or "aarch64" in name_lower
+                    ):
+                        matched_asset = asset
+                        break
+                elif os_name == "Linux" and arch == "x86_64":
+                    if "linux" in name_lower and (
+                        "x86_64" in name_lower
+                        or "x64" in name_lower
+                        or "amd64" in name_lower
+                    ):
+                        matched_asset = asset
+                        break
+                elif os_name == "Linux" and arch == "arm64":
+                    if "linux" in name_lower and (
+                        "arm64" in name_lower or "aarch64" in name_lower
+                    ):
+                        matched_asset = asset
+                        break
+                elif os_name == "Windows":
+                    if "windows" in name_lower and (
+                        "x64" in name_lower or "x86_64" in name_lower
+                    ):
+                        matched_asset = asset
+                        break
+                elif os_name == "MacOS":
+                    if "macos" in name_lower or "darwin" in name_lower:
+                        if arch == "arm64" and (
+                            "arm64" in name_lower or "aarch64" in name_lower
+                        ):
+                            matched_asset = asset
+                            break
+                        elif arch == "x86_64" and (
+                            "x86_64" in name_lower or "x64" in name_lower
+                        ):
+                            matched_asset = asset
+                            break
+            if matched_asset:
+                break
+
+        if not matched_asset:
+            if logger:
+                logger.log(
+                    "ERROR",
+                    f"No prebuilt PMMP PHP binary available for {os_name} ({arch}).",
+                )
+            return None
+
+        download_url = matched_asset.get("browser_download_url")
+        asset_name = matched_asset.get("name", "php-binary.tar.gz")
+        archive_path = dest_dir / asset_name
+
+        if logger:
+            logger.log("INFO", f"Downloading PHP binary for PocketMine: {asset_name}")
+
+        dl_resp = safe_request(session, "GET", download_url, logger=logger, stream=True)
+        if not dl_resp:
+            if logger:
+                logger.log(
+                    "ERROR", f"Failed to download PHP binary from {download_url}"
+                )
+            return None
+
+        with archive_path.open("wb") as handle:
+            for chunk in dl_resp.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    handle.write(chunk)
+
+        if asset_name.endswith(".zip"):
+            safe_extract_zip(archive_path, dest_dir)
+        else:
+            safe_extract_tar(archive_path, dest_dir)
+
+        archive_path.unlink(missing_ok=True)
+
+        for candidate_rel in (
+            Path("bin/php7/bin/php"),
+            Path("bin/php/bin/php"),
+            Path("bin/php"),
+            Path("php"),
+            Path("bin/php.exe"),
+            Path("php.exe"),
+        ):
+            cand_path = dest_dir / candidate_rel
+            if cand_path.is_file():
+                try:
+                    cand_path.chmod(0o755)
+                except OSError:
+                    pass
+                return cand_path
+
+        for found_file in dest_dir.rglob("php*"):
+            if found_file.is_file() and found_file.name in ("php", "php.exe"):
+                try:
+                    found_file.chmod(0o755)
+                except OSError:
+                    pass
+                return found_file
+
+        return None
+    except Exception as exc:
+        if logger:
+            logger.log("ERROR", f"Error provisioning PocketMine PHP binary: {exc}")
         return None
     finally:
         session.close()
