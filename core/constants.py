@@ -89,9 +89,8 @@ PHP_BINARIES_API = "https://api.github.com/repos/pmmp/PHP-Binaries/releases"
 PHP_DIR = CONFIG_DIR / "php"
 COMMON_PHP_BASES = [
     PHP_DIR,
-    Path("/usr/local/bin"),
-    Path("/usr/bin"),
-    Path("/data/data/com.termux/files/usr/bin"),
+    Path(os.path.expanduser("~/.config/msm/php")),
+    Path(os.path.expanduser("~/php")),
 ]
 
 

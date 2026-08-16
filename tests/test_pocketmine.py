@@ -120,6 +120,29 @@ def test_get_php_path_resolves_custom_and_server_binaries(tmp_path: Path):
     ) == str(local_bin)
 
 
+def test_get_php_path_skips_incompatible_system_php_and_triggers_auto_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    installed_php = tmp_path / "installed_php"
+    installed_php.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    # Simulate system PHP is NTS
+    monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/php")
+    monkeypatch.setattr(
+        "utils.system.detect_php_runtime",
+        lambda *args, **kwargs: {"exists": True, "compatible": False},
+    )
+    monkeypatch.setattr(
+        "utils.network.download_php_binary",
+        lambda *args, **kwargs: installed_php,
+    )
+
+    result = get_php_path(
+        config={}, server_dir=tmp_path / "empty_srv", auto_install=True
+    )
+    assert result == str(installed_php)
+
+
 def test_download_php_binary_matches_android_arm64_asset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

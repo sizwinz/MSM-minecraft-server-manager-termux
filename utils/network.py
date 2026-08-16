@@ -692,6 +692,18 @@ def download_php_binary(
 
         archive_path.unlink(missing_ok=True)
 
+        for item in dest_dir.rglob("*"):
+            if item.is_file():
+                try:
+                    if item.name in ("php", "php.exe") or item.suffix in (
+                        ".so",
+                        ".dll",
+                        "",
+                    ):
+                        item.chmod(0o755)
+                except OSError:
+                    pass
+
         for candidate_rel in (
             Path("bin/php7/bin/php"),
             Path("bin/php/bin/php"),
@@ -702,18 +714,10 @@ def download_php_binary(
         ):
             cand_path = dest_dir / candidate_rel
             if cand_path.is_file():
-                try:
-                    cand_path.chmod(0o755)
-                except OSError:
-                    pass
                 return cand_path
 
         for found_file in dest_dir.rglob("php*"):
             if found_file.is_file() and found_file.name in ("php", "php.exe"):
-                try:
-                    found_file.chmod(0o755)
-                except OSError:
-                    pass
                 return found_file
 
         return None
