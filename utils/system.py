@@ -458,20 +458,22 @@ def detect_php_runtime(php_binary: str | Path | None, logger=None) -> dict[str, 
         [bin_path, "-v"], logger=logger, check=False, capture_output=True
     )
 
-    # If direct execution fails in Termux, check if glibc-runner or proot can execute it
+    # If direct execution fails in Termux, check if glibc-runner or grun can execute it
     if (
         not result or result.returncode != 0 or not result.stdout
     ) and running_on_termux():
-        if shutil.which("glibc-runner"):
-            glibc_res = run_command(
-                ["glibc-runner", bin_path, "-v"],
-                logger=logger,
-                check=False,
-                capture_output=True,
-            )
-            if glibc_res and glibc_res.returncode == 0 and glibc_res.stdout:
-                runner_prefix = ["glibc-runner"]
-                result = glibc_res
+        for runner_name in ("glibc-runner", "grun"):
+            if shutil.which(runner_name):
+                glibc_res = run_command(
+                    [runner_name, bin_path, "-v"],
+                    logger=logger,
+                    check=False,
+                    capture_output=True,
+                )
+                if glibc_res and glibc_res.returncode == 0 and glibc_res.stdout:
+                    runner_prefix = [runner_name]
+                    result = glibc_res
+                    break
 
     if not result or result.returncode != 0 or not result.stdout:
         return {
@@ -616,10 +618,10 @@ def get_php_path(
                     "ERROR",
                     "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be run.\n"
                     "On Termux on x86_64 devices, official PMMP prebuilt binaries require glibc.\n"
-                    "To fix this, either:\n"
-                    " 1. Install glibc-runner: 'pkg install glibc-runner'\n"
-                    " 2. Run inside a PRoot Linux distro: 'proot-distro install ubuntu'\n"
-                    " 3. Specify a custom compiled ZTS PHP binary path in MSM settings.",
+                    "To fix this, run:\n"
+                    "  pkg install glibc-repo -y && pkg install glibc-runner -y\n"
+                    "Or run inside a PRoot Linux distro:\n"
+                    "  pkg install proot-distro && proot-distro install ubuntu",
                 )
                 return None
         logger.log(
