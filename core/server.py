@@ -53,6 +53,7 @@ from utils.rcon import RCONClient, RCONError
 from utils.system import (
     build_screen_launch_command,
     check_disk_space,
+    detect_php_runtime,
     format_bytes,
     get_java_path,
     get_local_ipv4_addresses,
@@ -309,8 +310,10 @@ class ServerInstance:
             raise RuntimeError(
                 "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located."
             )
-        return [
-            php_binary,
+        php_info = detect_php_runtime(php_binary, logger=self.logger)
+        runner_prefix = php_info.get("runner_prefix", [])
+        return runner_prefix + [
+            str(php_binary),
             f"-dmemory_limit={ram_mb}M",
             artifact,
             "--no-wizard",

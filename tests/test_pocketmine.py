@@ -96,7 +96,17 @@ def test_detect_php_runtime_handles_nts_incompatible(
     assert info["compatible"] is False
 
 
-def test_get_php_path_resolves_custom_and_server_binaries(tmp_path: Path):
+def test_get_php_path_resolves_custom_and_server_binaries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(
+        "utils.system.detect_php_runtime",
+        lambda *args, **kwargs: {
+            "exists": True,
+            "compatible": True,
+            "runner_prefix": [],
+        },
+    )
     custom_bin = tmp_path / "custom_php"
     custom_bin.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -274,6 +284,14 @@ def test_pocketmine_startup_command_and_server_properties(
     monkeypatch.setattr("core.server.get_server_dir", lambda name: server_dir)
     monkeypatch.setattr(
         "core.server.get_php_path", lambda *args, **kwargs: str(php_executable)
+    )
+    monkeypatch.setattr(
+        "core.server.detect_php_runtime",
+        lambda *args, **kwargs: {
+            "exists": True,
+            "compatible": True,
+            "runner_prefix": [],
+        },
     )
 
     mock_config_mgr = MagicMock()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -96,6 +97,10 @@ def run_command(
     except FileNotFoundError:
         if logger:
             logger.log("ERROR", "Command not found", command=command)
+        return None
+    except OSError as exc:
+        if logger:
+            logger.log("DEBUG", f"Command failed to execute ({command}): {exc}")
         return None
 
 
@@ -423,10 +428,9 @@ def get_java_path(
     return None
 
 
-def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
-    """Inspect a PHP binary for version, ZTS support, and PocketMine compatibility."""
-    bin_path = str(php_binary)
-    if not shutil.which(bin_path) and not Path(bin_path).exists():
+def detect_php_runtime(php_binary: str | Path | None, logger=None) -> dict[str, Any]:
+    """Inspect a PHP binary for Zend Thread Safety (ZTS) and required PMMP extensions."""
+    if not php_binary:
         return {
             "exists": False,
             "version": None,
@@ -434,12 +438,42 @@ def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
             "has_pmmpthread": False,
             "has_yaml": False,
             "compatible": False,
+            "runner_prefix": [],
         }
 
+    bin_path = str(php_binary)
+    if not Path(bin_path).is_file() and not shutil.which(bin_path):
+        return {
+            "exists": False,
+            "version": None,
+            "zts": False,
+            "has_pmmpthread": False,
+            "has_yaml": False,
+            "compatible": False,
+            "runner_prefix": [],
+        }
+
+    runner_prefix: list[str] = []
     result = run_command(
         [bin_path, "-v"], logger=logger, check=False, capture_output=True
     )
-    if not result or result.stdout is None:
+
+    # If direct execution fails in Termux, check if glibc-runner or proot can execute it
+    if (
+        not result or result.returncode != 0 or not result.stdout
+    ) and running_on_termux():
+        if shutil.which("glibc-runner"):
+            glibc_res = run_command(
+                ["glibc-runner", bin_path, "-v"],
+                logger=logger,
+                check=False,
+                capture_output=True,
+            )
+            if glibc_res and glibc_res.returncode == 0 and glibc_res.stdout:
+                runner_prefix = ["glibc-runner"]
+                result = glibc_res
+
+    if not result or result.returncode != 0 or not result.stdout:
         return {
             "exists": False,
             "version": None,
@@ -447,6 +481,7 @@ def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
             "has_pmmpthread": False,
             "has_yaml": False,
             "compatible": False,
+            "runner_prefix": [],
         }
 
     output = result.stdout
@@ -461,8 +496,9 @@ def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
     if len(tokens) > 1 and tokens[0].lower() == "php":
         version_str = tokens[1]
 
+    modules_cmd = runner_prefix + [bin_path, "-m"]
     modules_res = run_command(
-        [bin_path, "-m"], logger=logger, check=False, capture_output=True
+        modules_cmd, logger=logger, check=False, capture_output=True
     )
     modules_set = set()
     if modules_res and modules_res.stdout:
@@ -482,6 +518,7 @@ def detect_php_runtime(php_binary: str | Path, logger=None) -> dict[str, Any]:
         "has_pmmpthread": has_pmmpthread,
         "has_yaml": has_yaml,
         "compatible": compatible,
+        "runner_prefix": runner_prefix,
     }
 
 
@@ -499,7 +536,9 @@ def get_php_path(
     if custom_php:
         custom_path = Path(custom_php)
         if custom_path.exists() or shutil.which(custom_php):
-            return str(custom_path)
+            info = detect_php_runtime(custom_php, logger=logger)
+            if info["exists"]:
+                return str(custom_path)
 
     # 2. Server directory local binaries
     if server_dir:
@@ -514,7 +553,9 @@ def get_php_path(
         ):
             candidate = s_dir / rel
             if candidate.is_file():
-                return str(candidate)
+                info = detect_php_runtime(candidate, logger=logger)
+                if info["exists"] and (info["compatible"] or "bin/php" in str(rel)):
+                    return str(candidate)
 
     # 3. Global MSM PHP directory (~/.config/msm/php) and COMMON_PHP_BASES
     for base in COMMON_PHP_BASES:
@@ -530,7 +571,9 @@ def get_php_path(
         ):
             candidate = base / rel
             if candidate.is_file():
-                return str(candidate)
+                info = detect_php_runtime(candidate, logger=logger)
+                if info["exists"] and (info["compatible"] or "bin/php" in str(rel)):
+                    return str(candidate)
 
     # 4. System PHP on PATH (verify compatibility)
     system_php = shutil.which("php")
@@ -552,12 +595,33 @@ def get_php_path(
 
             installed_php = download_php_binary(PHP_DIR, logger=logger)
             if installed_php and installed_php.exists():
-                return str(installed_php)
+                info = detect_php_runtime(installed_php, logger=logger)
+                if info["exists"]:
+                    return str(installed_php)
+                if logger:
+                    logger.log(
+                        "ERROR",
+                        f"Downloaded PHP binary ({installed_php}) cannot be executed "
+                        f"directly on this system environment.",
+                    )
         except Exception as exc:
             if logger:
                 logger.log("WARNING", f"Auto-download of PHP binary failed: {exc}")
 
     if logger:
+        if running_on_termux():
+            machine = platform.machine().lower()
+            if machine in ("x86_64", "amd64", "x86", "i686"):
+                logger.log(
+                    "ERROR",
+                    "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be run.\n"
+                    "On Termux on x86_64 devices, official PMMP prebuilt binaries require glibc.\n"
+                    "To fix this, either:\n"
+                    " 1. Install glibc-runner: 'pkg install glibc-runner'\n"
+                    " 2. Run inside a PRoot Linux distro: 'proot-distro install ubuntu'\n"
+                    " 3. Specify a custom compiled ZTS PHP binary path in MSM settings.",
+                )
+                return None
         logger.log(
             "ERROR",
             "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located.\n"
