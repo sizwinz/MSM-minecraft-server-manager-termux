@@ -1,4 +1,4 @@
-"""System, process, and filesystem helpers."""
+"""System, process, and filesystem helpers with strict compatibility policies."""
 
 from __future__ import annotations
 
@@ -28,6 +28,10 @@ from core.constants import (
     MAX_RAM_PERCENTAGE,
     PHP_DIR,
 )
+from platforms.detector import detect_platform, is_running_on_termux
+from platforms.paths import get_path_service
+
+running_on_termux = is_running_on_termux
 
 
 def sanitize_input(value: str, max_length: int = MAX_FILENAME_LENGTH) -> str:
@@ -187,7 +191,7 @@ def get_system_info() -> dict[str, Any]:
 
 
 def get_server_dir(server_name: str) -> Path:
-    return Path.home() / f"minecraft-{sanitize_input(server_name)}"
+    return get_path_service().resolve_server_dir(server_name)
 
 
 def get_screen_name(server_name: str) -> str:
@@ -195,6 +199,8 @@ def get_screen_name(server_name: str) -> str:
 
 
 def screen_session_exists(screen_name: str, logger=None) -> bool:
+    if shutil.which("screen") is None:
+        return False
     result = run_command(
         ["screen", "-ls", screen_name],
         logger=logger,
@@ -283,7 +289,11 @@ def read_text_file(path: str | os.PathLike[str]) -> str | None:
 def write_text_file(path: str | os.PathLike[str], value: str) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(value, encoding="utf-8")
+    tmp_path = file_path.with_suffix(
+        f"{file_path.suffix}.tmp_{int(time.time() * 1000)}"
+    )
+    tmp_path.write_text(value, encoding="utf-8")
+    tmp_path.replace(file_path)
 
 
 def remove_file(path: str | os.PathLike[str]) -> None:
@@ -291,7 +301,7 @@ def remove_file(path: str | os.PathLike[str]) -> None:
 
 
 def is_pid_running(pid: int | None, expected_names: list[str] | None = None) -> bool:
-    if not pid:
+    if not pid or pid <= 0:
         return False
     try:
         proc = psutil.Process(pid)
@@ -313,7 +323,7 @@ def _parse_java_version(output: str) -> str | None:
             if not cleaned or not cleaned[0].isdigit():
                 continue
             parts = cleaned.split(".")
-            # Java 8 and earlier use 1.x.y versioning
+            # Java 8 and earlier use 1.x.y versioning (e.g. 1.8.0_312)
             if parts[0] == "1" and len(parts) > 1:
                 return parts[1]
             return parts[0]
@@ -335,6 +345,7 @@ def detect_java_version(java_binary: str, logger=None) -> str | None:
 
 
 def get_required_java(version: str | None) -> str:
+    """Return required major Java version according to Minecraft release rules."""
     if not version:
         return "17"
     parts = version.split(".")
@@ -357,52 +368,118 @@ def get_required_java(version: str | None) -> str:
     return "17"
 
 
+def is_java_version_compatible(required: str, actual: str) -> tuple[bool, str]:
+    """Explicit Java compatibility policy:
+
+    - Exact version match: 100% compatible.
+    - Java 8: MUST use Java 8 (running legacy servers on Java 17+ breaks internal reflection).
+    - Java 17 required: Java 21 is permitted fallback with warning. Java 8 is rejected.
+    - Java 21 required: Java 25 is permitted fallback with warning. Java 17 or older is rejected.
+    - Java 25 required: Older Java is rejected.
+    """
+    if not actual or not required:
+        return False, "Unknown Java version"
+
+    if actual == required:
+        return True, "exact"
+
+    # Java 8 legacy Minecraft cannot safely run on newer Java (17/21/25)
+    if required == "8":
+        return (
+            False,
+            f"Minecraft requires Java 8; Java {actual} is incompatible with legacy versions.",
+        )
+
+    try:
+        req_num = int(required)
+        act_num = int(actual)
+    except ValueError:
+        return False, f"Non-numeric Java versions: required={required}, actual={actual}"
+
+    if act_num < req_num:
+        return (
+            False,
+            f"Java {actual} is too old; Java {required} or compatible runtime required.",
+        )
+
+    # Permitted fallbacks
+    if required == "17" and actual == "21":
+        return True, "Java 17 required; using Java 21 fallback (permitted)."
+    if required == "21" and actual == "25":
+        return True, "Java 21 required; using Java 25 fallback (permitted)."
+    if required == "17" and actual == "25":
+        return True, "Java 17 required; using Java 25 fallback (permitted)."
+
+    return False, f"Java {actual} is not a certified fallback for Java {required}."
+
+
 def get_java_path(
-    mc_version: str | None, config: dict[str, Any], logger=None
+    mc_version: str | None,
+    config: dict[str, Any] | None = None,
+    logger=None,
 ) -> str | None:
+    """Locate a strictly compatible Java binary for the target Minecraft version."""
     required_version = get_required_java(mc_version)
+    cfg = config or {}
 
     def _collect_candidates() -> list[str]:
         result: list[str] = []
-        custom_home = config.get("java_homes", {}).get(required_version)
+        custom_home = cfg.get("java_homes", {}).get(required_version)
         if custom_home:
-            result.append(str(Path(custom_home) / "bin" / "java"))
+            for cand in (
+                Path(custom_home) / "bin" / "java",
+                Path(custom_home) / "bin" / "java.exe",
+                Path(custom_home),
+            ):
+                result.append(str(cand))
 
+        # Check versioned binaries on PATH
         for name in (
             f"java-{required_version}",
             f"java{required_version}",
             f"jdk-{required_version}",
             f"jdk{required_version}",
+            f"java-{required_version}.exe",
+            f"java{required_version}.exe",
         ):
             bin_path = shutil.which(name)
             if bin_path:
                 result.append(bin_path)
 
+        # Base directories
+        for base_path in COMMON_JAVA_HOME_BASES:
+            if not base_path or not base_path.exists():
+                continue
+            for candidate in (
+                base_path / str(required_version) / "bin" / "java",
+                base_path / str(required_version) / "bin" / "java.exe",
+                base_path / f"jdk-{required_version}" / "bin" / "java",
+                base_path / f"jdk-{required_version}" / "bin" / "java.exe",
+                base_path / f"openjdk-{required_version}" / "bin" / "java",
+                base_path / f"openjdk-{required_version}" / "bin" / "java.exe",
+                base_path / f"java-{required_version}-openjdk" / "bin" / "java",
+                base_path / f"java-{required_version}-openjdk" / "bin" / "java.exe",
+                base_path / "bin" / "java",
+                base_path / "bin" / "java.exe",
+            ):
+                result.append(str(candidate))
+
+        # System java on PATH
         java_on_path = shutil.which("java")
         if java_on_path:
             result.append(java_on_path)
 
-        for base_path in COMMON_JAVA_HOME_BASES:
-            if not base_path:
-                continue
-            for candidate in (
-                base_path / str(required_version) / "bin" / "java",
-                base_path / f"openjdk-{required_version}" / "bin" / "java",
-                base_path / f"java-{required_version}-openjdk" / "bin" / "java",
-                base_path / f"jdk-{required_version}" / "bin" / "java",
-                base_path / "bin" / "java",
-            ):
-                result.append(str(candidate))
         return result
 
-    def _find_best_match(
+    def _evaluate_candidates(
         candidates: list[str],
     ) -> tuple[str | None, str | None, str | None, str | None]:
         checked: set[str] = set()
+        exact_match: str | None = None
+        fallback_match: str | None = None
+        fallback_ver: str | None = None
         mismatch_path: str | None = None
-        mismatch_version: str | None = None
-        compatible_path: str | None = None
-        compatible_version: str | None = None
+        mismatch_ver: str | None = None
 
         for candidate in candidates:
             if not candidate or candidate in checked:
@@ -410,39 +487,45 @@ def get_java_path(
             checked.add(candidate)
             if shutil.which(candidate) is None and not Path(candidate).exists():
                 continue
+
             actual_version = detect_java_version(candidate, logger=logger)
+            if not actual_version:
+                continue
+
             if actual_version == required_version:
-                return candidate, None, None, None
+                exact_match = candidate
+                break
 
-            # Allow newer Java versions to satisfy older requirements
-            if (
-                actual_version
-                and actual_version.isdigit()
-                and required_version.isdigit()
-            ):
-                if int(actual_version) >= int(required_version):
-                    if not compatible_path or int(actual_version) < int(
-                        compatible_version
-                    ):
-                        compatible_path = candidate
-                        compatible_version = actual_version
-
-            if actual_version:
+            compatible, reason = is_java_version_compatible(
+                required_version, actual_version
+            )
+            if compatible and not fallback_match:
+                fallback_match = candidate
+                fallback_ver = actual_version
+            elif not compatible:
                 mismatch_path = candidate
-                mismatch_version = actual_version
+                mismatch_ver = actual_version
 
-        return (
-            compatible_path,
-            compatible_version,
-            mismatch_path,
-            mismatch_version,
-        )
+        return exact_match, fallback_match, fallback_ver, mismatch_path, mismatch_ver
 
     candidates = _collect_candidates()
-    match, _match_ver, mismatch_path, mismatch_ver = _find_best_match(candidates)
-    if match:
-        return match
+    exact, fallback, fallback_ver, mismatch_path, mismatch_ver = _evaluate_candidates(
+        candidates
+    )
 
+    if exact:
+        return exact
+
+    if fallback:
+        if logger:
+            logger.log(
+                "WARNING",
+                f"Java {required_version} requested; using certified fallback "
+                f"Java {fallback_ver} at {fallback}.",
+            )
+        return fallback
+
+    # Termux on-demand package installation
     if running_on_termux():
         if logger:
             logger.log(
@@ -462,23 +545,27 @@ def get_java_path(
             capture_output=True,
         )
         candidates = _collect_candidates()
-        match, _match_ver, mismatch_path, mismatch_ver = _find_best_match(candidates)
-        if match:
-            return match
+        exact, fallback, fallback_ver, mismatch_path, mismatch_ver = (
+            _evaluate_candidates(candidates)
+        )
+        if exact:
+            return exact
+        if fallback:
+            return fallback
 
     if logger:
         if mismatch_path:
             logger.log(
                 "ERROR",
                 (
-                    f"Java {required_version} is required but {mismatch_ver} "
-                    f"was found at {mismatch_path}"
+                    f"Java {required_version} is required but incompatible Java {mismatch_ver} "
+                    f"was found at {mismatch_path}."
                 ),
             )
         else:
             logger.log(
                 "ERROR",
-                f"Java {required_version} is required but no matching runtime was found.",
+                f"Java {required_version} is required but no compatible runtime was found.",
             )
     return None
 
@@ -519,7 +606,6 @@ def detect_php_runtime(php_binary: str | Path | None, logger=None) -> dict[str, 
     ) and running_on_termux():
         for runner_name in ("grun", "glibc-runner"):
             if shutil.which(runner_name):
-                # Try patching the ELF interpreter first with runner --set
                 run_command(
                     [runner_name, "--set", bin_path],
                     logger=logger,
@@ -603,7 +689,7 @@ def get_php_path(
     auto_install: bool = True,
     logger=None,
 ) -> str | None:
-    """Resolve a compatible PHP binary for PocketMine-MP."""
+    """Resolve a strictly compatible PHP binary for PocketMine-MP."""
     cfg = config or {}
 
     # 1. Custom configured php_path in config
@@ -612,7 +698,7 @@ def get_php_path(
         custom_path = Path(custom_php)
         if custom_path.exists() or shutil.which(custom_php):
             info = detect_php_runtime(custom_php, logger=logger)
-            if info["exists"]:
+            if info["exists"] and info["compatible"]:
                 return str(custom_path)
 
     # 2. Server directory local binaries
@@ -632,7 +718,7 @@ def get_php_path(
                 if info["exists"] and (info["compatible"] or "bin/php" in str(rel)):
                     return str(candidate)
 
-    # 3. Global MSM PHP directory (~/.config/msm/php) and COMMON_PHP_BASES
+    # 3. Global MSM PHP directory and COMMON_PHP_BASES
     for base in COMMON_PHP_BASES:
         if not base or not base.exists():
             continue
@@ -701,52 +787,31 @@ def get_php_path(
             "ERROR",
             "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located.\n"
             "Standard system PHP packages lack required thread-safety and PMMP extensions.\n"
-            "Please configure 'php_path' in ~/.config/msm/config.json or place a compatible "
-            "PMMP PHP binary in ~/.config/msm/php or <server>/bin/.",
+            "Please configure 'php_path' in config.json or place a compatible "
+            "PMMP PHP binary in msm/php or <server>/bin/.",
         )
     return None
 
 
-def running_on_termux() -> bool:
-    prefix = os.environ.get("PREFIX", "")
-    return "termux" in prefix.lower() or Path("/data/data/com.termux").exists()
-
-
 def check_base_dependencies(logger) -> bool:
-    if sys.platform != "win32":
-        missing = [name for name in ["screen"] if shutil.which(name) is None]
-        if missing:
-            logger.log("ERROR", f"Missing required tools: {', '.join(missing)}")
-            if running_on_termux():
-                logger.log(
-                    "INFO",
-                    "Install them with: pkg install screen openjdk-17 openjdk-21 php",
-                )
-            else:
-                logger.log(
-                    "INFO",
-                    "Install them with: sudo apt-get install screen openjdk-17-jre-headless"
-                    " (Debian/Ubuntu) or the equivalent for your distro.",
-                )
-            return False
+    """Verify core tool availability based on platform capabilities."""
+    platform_desc = detect_platform()
+    caps = platform_desc.capabilities
+
+    if caps.supports_screen and "screen" in caps.supported_backends:
+        if shutil.which("screen") is None:
+            logger.log(
+                "INFO",
+                "GNU Screen is not installed. Native process backend will be used.",
+            )
+
     if shutil.which("java") is None:
         logger.log(
             "WARNING",
             (
                 "No Java runtime is currently on PATH. Java servers will need a "
-                "configured java_homes entry."
+                "configured java_homes entry or provisioned runtime."
             ),
-        )
-    if (
-        shutil.which("php") is None
-        and not (PHP_DIR / "bin/php7/bin/php").exists()
-        and not (PHP_DIR / "bin/php/bin/php").exists()
-        and not (PHP_DIR / "bin/php").exists()
-    ):
-        logger.log(
-            "INFO",
-            "No PHP binary found. PocketMine servers will download a "
-            "compatible runtime automatically on demand.",
         )
     return True
 

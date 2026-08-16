@@ -283,10 +283,22 @@ def test_pocketmine_startup_command_and_server_properties(
 
     monkeypatch.setattr("core.server.get_server_dir", lambda name: server_dir)
     monkeypatch.setattr(
-        "core.server.get_php_path", lambda *args, **kwargs: str(php_executable)
+        "core.adapters.pocketmine.get_php_path",
+        lambda *args, **kwargs: str(php_executable),
     )
     monkeypatch.setattr(
-        "core.server.detect_php_runtime",
+        "utils.system.get_php_path", lambda *args, **kwargs: str(php_executable)
+    )
+    monkeypatch.setattr(
+        "utils.system.detect_php_runtime",
+        lambda *args, **kwargs: {
+            "exists": True,
+            "compatible": True,
+            "runner_prefix": [],
+        },
+    )
+    monkeypatch.setattr(
+        "core.adapters.pocketmine.detect_php_runtime",
         lambda *args, **kwargs: {
             "exists": True,
             "compatible": True,

@@ -15,7 +15,10 @@ class EnhancedLogger:
     """Log to file and stdout with lightweight structured context."""
 
     def __init__(
-        self, log_file: str | os.PathLike[str], max_size: int, retention_days: int
+        self,
+        log_file: str | os.PathLike[str],
+        max_size: int = 50 * 1024 * 1024,
+        retention_days: int = 30,
     ):
         self.log_file = Path(log_file)
         self.max_size = max_size

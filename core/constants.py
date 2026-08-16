@@ -8,11 +8,15 @@ import zipfile
 from pathlib import Path
 
 VERSION = "6.0"
+CONFIG_SCHEMA_VERSION = 2
 
-CONFIG_DIR = Path(os.path.expanduser("~/.config/msm"))
+# Legacy default paths
+_home = Path.home()
+CONFIG_DIR = _home / ".config" / "msm"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DATABASE_FILE = CONFIG_DIR / "msm.db"
 LOG_FILE = CONFIG_DIR / "msm.log"
+PHP_DIR = CONFIG_DIR / "php"
 
 VERSIONS_PER_PAGE = 15
 PAPER_VERSION_LOOKBACK = 20
@@ -40,6 +44,7 @@ WORLD_SUFFIX_PATTERN = re.compile(r"^world(?:[_.-].+)?$", re.IGNORECASE)
 BACKUP_COMPRESSION = zipfile.ZIP_DEFLATED
 BACKUP_COMPRESSION_LEVEL = 6
 
+PROCESS_STATE_FILE_NAME = ".msm.process.json"
 PID_FILE_NAME = ".msm.pid"
 SESSION_FILE_NAME = ".msm.session"
 TUNNEL_PID_FILE_NAME = ".msm.tunnel.pid"
@@ -73,6 +78,9 @@ _prefix = os.environ.get("PREFIX", "")
 _termux_jvm = Path("/data/data/com.termux/files/usr/lib/jvm")
 _prefix_jvm = Path(_prefix) / "lib" / "jvm" if _prefix else None
 
+_program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+_program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
 COMMON_JAVA_HOME_BASES = [
     *([Path(_java_home)] if _java_home else []),
     *([_prefix_jvm] if _prefix_jvm else []),
@@ -80,17 +88,26 @@ COMMON_JAVA_HOME_BASES = [
     Path(os.path.expanduser("~/.config/msm/java")),
     Path("/usr/lib/jvm"),
     Path("/usr/lib64/jvm"),
+    Path("/usr/local/openjdk-17"),
+    Path("/usr/local/openjdk-21"),
+    Path("/Library/Java/JavaVirtualMachines"),
+    Path(_program_files) / "Eclipse Adoptium",
+    Path(_program_files) / "Java",
+    Path(_program_files) / "Microsoft",
+    Path(_program_files_x86) / "Java",
     Path("/usr/lib/jvm/java-17-openjdk-amd64"),
     Path("/usr/lib/jvm/java-21-openjdk-amd64"),
     Path("/usr/lib/jvm/java-25-openjdk-amd64"),
 ]
 
 PHP_BINARIES_API = "https://api.github.com/repos/pmmp/PHP-Binaries/releases"
-PHP_DIR = CONFIG_DIR / "php"
 COMMON_PHP_BASES = [
     PHP_DIR,
     Path(os.path.expanduser("~/.config/msm/php")),
     Path(os.path.expanduser("~/php")),
+    _home / "AppData" / "Local" / "MSM" / "php",
+    Path(r"C:\php"),
+    Path(r"C:\tools\php"),
 ]
 
 

@@ -29,7 +29,6 @@ class RuntimeManager:
                     self.logger,
                 )
                 self._instances[server_name] = instance
-                self._instances[server_name] = instance
             return instance
 
     def resume_running_servers(self) -> None:

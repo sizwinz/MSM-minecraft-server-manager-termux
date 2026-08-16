@@ -57,7 +57,7 @@ print_banner() {
 
     echo -e "${C_CYAN}  __  __ ____  __  __ ${C_RESET}"
     echo -e "${C_CYAN} |  \/  / ___||  \/  |${C_RESET}  ${C_BOLD}Minecraft Server Manager${C_RESET}"
-    echo -e "${C_CYAN} | |\/| \___ \| |\/| |${C_RESET}  ${C_DIM}Termux & Linux Edition${C_RESET}"
+    echo -e "${C_CYAN} | |\/| \___ \| |\/| |${C_RESET}  ${C_DIM}Cross-Platform Edition${C_RESET}"
     echo -e "${C_CYAN} |_|  |_|____/|_|  |_|${C_RESET}  ${C_DIM}v6.0${C_RESET}"
     echo -e "${C_CYAN}${line}${C_RESET}\n"
 }
@@ -191,6 +191,10 @@ is_void_like() {
     command -v xbps-install >/dev/null 2>&1
 }
 
+is_freebsd() {
+    [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]
+}
+
 is_macos() {
     [ "${MSM_PLATFORM:-}" = "macos" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]
 }
@@ -278,9 +282,10 @@ setup_all_java_runtimes() {
         run pkg install -y openjdk-25 openjdk-21 openjdk-17 || run pkg install -y openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
         return 0
     fi
-    install_adoptium_java 17
-    install_adoptium_java 21
+    install_adoptium_java 17 || true
+    install_adoptium_java 21 || true
     install_adoptium_java 25 || true
+    install_adoptium_java 8 || true
 }
 
 install_apt_package_if_available() {
@@ -335,6 +340,10 @@ install_suse_dependencies() {
 
 install_void_dependencies() {
     priv xbps-install -y git screen python3 python3-pip curl gnupg
+}
+
+install_freebsd_dependencies() {
+    priv pkg install -y git screen python3 py311-pip curl ca_root_nss
 }
 
 install_macos_dependencies() {
@@ -399,7 +408,7 @@ print_success_card() {
     echo -e "${C_GREEN}│${C_RESET}  ${C_BOLD}✨ MSM installed successfully!${C_RESET}"
     echo -e "${C_GREEN}│${C_RESET}"
     echo -e "${C_GREEN}│${C_RESET}  To launch MSM:"
-    echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}cd ${INSTALL_DIR}${C_RESET}"
+    echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}cd \"${INSTALL_DIR}\"${C_RESET}"
     echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}source .venv/bin/activate${C_RESET}"
     echo -e "${C_GREEN}│${C_RESET}    ${C_CYAN}python msm.py${C_RESET}"
     echo -e "${C_GREEN}╰${line}╯${C_RESET}\n"
@@ -440,6 +449,10 @@ main() {
         setup_privilege void
         run_step 1 5 "Updating package repositories" priv xbps-install -S
         run_step 2 5 "Installing core dependencies (git, screen, python3, curl)" install_void_dependencies
+    elif is_freebsd; then
+        setup_privilege freebsd
+        run_step 1 5 "Updating package repositories" priv pkg update
+        run_step 2 5 "Installing core dependencies (git, screen, python3, curl)" install_freebsd_dependencies
     elif is_macos; then
         setup_privilege macos
         if command -v brew >/dev/null 2>&1; then

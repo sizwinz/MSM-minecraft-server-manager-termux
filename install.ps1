@@ -59,7 +59,7 @@ $RepoUrl = "https://github.com/sizwinz/MSM-minecraft-server-manager-termux.git"
 $RepoDirName = "MSM-minecraft-server-manager-termux"
 
 function Check-Python {
-    Write-StepHeader 1 5 "Checking Python environment"
+    Write-StepHeader 1 6 "Checking Python environment"
     $py = Get-Command python.exe -ErrorAction SilentlyContinue
     if (-not $py) {
         $py = Get-Command py.exe -ErrorAction SilentlyContinue
@@ -74,18 +74,24 @@ function Check-Python {
     }
 
     $verOutput = (& $py.Source --version 2>&1).ToString().Trim()
-    Write-StepSuccess 1 5 "$verOutput ($($py.Source))"
+    Write-StepSuccess 1 6 "$verOutput ($($py.Source))"
     return $py.Source
 }
 
 function Check-Git {
-    Write-StepHeader 2 5 "Checking Git"
+    Write-StepHeader 2 6 "Checking Git"
     $git = Get-Command git.exe -ErrorAction SilentlyContinue
     if ($git) {
         $gitVer = (& $git.Source --version 2>&1).ToString().Trim()
-        Write-StepSuccess 2 5 "$gitVer ($($git.Source))"
+        Write-StepSuccess 2 6 "$gitVer ($($git.Source))"
         return $git.Source
     } else {
+        # If running from current checkout, git is optional
+        $currentMsm = Join-Path (Get-Location) "msm.py"
+        if (Test-Path $currentMsm) {
+            Write-StepSuccess 2 6 "Using current repository checkout (Git optional)"
+            return $null
+        }
         Write-Color "  [!] Git was not found on your system." "Yellow"
         Write-Color "      You can install it automatically using Windows Package Manager:" "Gray"
         Write-Color "        winget install Git.Git" "Green"
@@ -94,13 +100,31 @@ function Check-Git {
     }
 }
 
+function Check-Java {
+    Write-StepHeader 3 6 "Checking Java runtime environments"
+    $java = Get-Command java.exe -ErrorAction SilentlyContinue
+    if ($java) {
+        try {
+            $verOutput = (& $java.Source -version 2>&1 | Select-Object -First 1).ToString().Trim()
+            Write-StepSuccess 3 6 "Java detected: $verOutput"
+        } catch {
+            Write-StepSuccess 3 6 "Java executable found at $($java.Source)"
+        }
+    } else {
+        Write-SubInfo "No system Java found on PATH. Java can be installed via winget:"
+        Write-Color "        winget install EclipseAdoptium.Temurin.17.JRE" "DarkGray"
+        Write-Color "        winget install EclipseAdoptium.Temurin.21.JRE" "DarkGray"
+        Write-StepSuccess 3 6 "Java runtime can be provisioned or configured in MSM"
+    }
+}
+
 function Prepare-Checkout {
-    Write-StepHeader 3 5 "Preparing MSM codebase"
+    Write-StepHeader 4 6 "Preparing MSM codebase"
     $currentMsm = Join-Path (Get-Location) "msm.py"
     $currentReq = Join-Path (Get-Location) "requirements.txt"
     if ((Test-Path $currentMsm) -and (Test-Path $currentReq)) {
         $targetDir = (Get-Location).Path
-        Write-StepSuccess 3 5 "Using current directory: $targetDir"
+        Write-StepSuccess 4 6 "Using current directory: $targetDir"
         return $targetDir
     }
 
@@ -111,19 +135,19 @@ function Prepare-Checkout {
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to clone repository from $RepoUrl"
         }
-        Write-StepSuccess 3 5 "Cloned to $targetDir"
+        Write-StepSuccess 4 6 "Cloned to $targetDir"
     } else {
-        Write-StepSuccess 3 5 "Using existing installation at $targetDir"
+        Write-StepSuccess 4 6 "Using existing installation at $targetDir"
     }
     return $targetDir
 }
 
 function Setup-Venv([string]$pythonPath, [string]$installDir) {
-    Write-StepHeader 4 5 "Configuring virtual environment (.venv)"
+    Write-StepHeader 5 6 "Configuring virtual environment (.venv)"
     $venvDir = Join-Path $installDir ".venv"
     $venvPython = Join-Path $venvDir "Scripts\python.exe"
     if ((Test-Path $venvDir) -and (Test-Path $venvPython)) {
-        Write-StepSuccess 4 5 "Virtual environment verified"
+        Write-StepSuccess 5 6 "Virtual environment verified"
     } else {
         if (Test-Path $venvDir) {
             Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
@@ -133,12 +157,12 @@ function Setup-Venv([string]$pythonPath, [string]$installDir) {
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to create virtual environment"
         }
-        Write-StepSuccess 4 5 "Virtual environment created"
+        Write-StepSuccess 5 6 "Virtual environment created"
     }
 }
 
 function Install-Dependencies([string]$installDir) {
-    Write-StepHeader 5 5 "Installing Python dependencies"
+    Write-StepHeader 6 6 "Installing Python dependencies"
     $venvPython = Join-Path $installDir ".venv\Scripts\python.exe"
     if (-not (Test-Path $venvPython)) {
         throw "Virtual environment python executable not found at $venvPython"
@@ -151,12 +175,17 @@ function Install-Dependencies([string]$installDir) {
         & $venvPython -m pip install -r $reqFile --quiet 2>$null
     }
 
-    # Generate convenient launcher batch script
+    # Generate convenient launcher batch script (msm.cmd)
     $cmdLauncher = Join-Path $installDir "msm.cmd"
     $cmdContent = "@echo off`r`ncall `"%~dp0.venv\Scripts\activate.bat`"`r`npython `"%~dp0msm.py`" %*"
     [System.IO.File]::WriteAllText($cmdLauncher, $cmdContent, [System.Text.Encoding]::ASCII)
 
-    Write-StepSuccess 5 5 "Dependencies installed and launcher configured"
+    # Generate powershell launcher (msm.ps1)
+    $psLauncher = Join-Path $installDir "msm.ps1"
+    $psContent = "& `"`$PSScriptRoot\.venv\Scripts\python.exe`" `"`$PSScriptRoot\msm.py`" `$args"
+    [System.IO.File]::WriteAllText($psLauncher, $psContent, [System.Text.Encoding]::UTF8)
+
+    Write-StepSuccess 6 6 "Dependencies installed and launchers configured (msm.cmd / msm.ps1)"
 }
 
 function Show-SuccessCard([string]$installDir) {
@@ -181,7 +210,7 @@ function Show-SuccessCard([string]$installDir) {
     Write-Color (Format-CardLine "") "Green"
     Write-Color (Format-CardLine "To launch MSM:") "Green"
     Write-Color (Format-CardLine ("  1. cd `"{0}`"" -f $installDir)) "Cyan"
-    Write-Color (Format-CardLine "  2. .\msm.cmd") "Cyan"
+    Write-Color (Format-CardLine "  2. .\msm.cmd  (or powershell .\msm.ps1)") "Cyan"
     Write-Color (Format-CardLine "") "Green"
     Write-Color (Format-CardLine "Or start directly via virtualenv:") "Gray"
     Write-Color (Format-CardLine "  .\.venv\Scripts\Activate.ps1 ; python msm.py") "DarkGray"
@@ -194,6 +223,7 @@ try {
     Show-Banner
     $py = Check-Python
     Check-Git | Out-Null
+    Check-Java
     $installDir = Prepare-Checkout
     Setup-Venv $py $installDir
     Install-Dependencies $installDir

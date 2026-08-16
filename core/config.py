@@ -9,10 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from core.constants import DEFAULT_BACKUP_INTERVAL_HOURS
+from core.constants import CONFIG_SCHEMA_VERSION, DEFAULT_BACKUP_INTERVAL_HOURS
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
+    "schema_version": CONFIG_SCHEMA_VERSION,
     "current_server": None,
+    "legacy_paths_mode": False,
     "java_homes": {},
     "php_path": None,
     "tunnel_defaults": {
@@ -25,13 +27,22 @@ DEFAULT_CONFIG = {
     "servers": {},
 }
 
-DEFAULT_SERVER_CONFIG = {
+DEFAULT_SERVER_CONFIG: dict[str, Any] = {
     "server_flavor": None,
     "server_version": None,
     "eula_accepted": True,
     "ram_mb": 2048,
     "php_path": None,
     "auto_restart": False,
+    "process_backend": "auto",
+    "server_dir": None,
+    "runtime": {
+        "artifact": None,
+        "runtime_type": "java",
+        "launch_arguments": [],
+        "install_schema_version": 1,
+        "java_policy": "strict",
+    },
     "backup_settings": {
         "enabled": False,
         "interval_hours": DEFAULT_BACKUP_INTERVAL_HOURS,
@@ -89,8 +100,34 @@ class ConfigManager:
             config["server_settings"]["motd"] = f"{server_name} Server"
         return config
 
+    def _migrate_schema(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Perform schema migrations if needed."""
+        version = int(raw.get("schema_version", 1))
+        if version < CONFIG_SCHEMA_VERSION:
+            raw["schema_version"] = CONFIG_SCHEMA_VERSION
+            # Migrate server configurations to include runtime metadata dictionary
+            for _s_name, s_cfg in raw.get("servers", {}).items():
+                if isinstance(s_cfg, dict):
+                    s_cfg.setdefault("process_backend", "auto")
+                    s_cfg.setdefault(
+                        "runtime",
+                        {
+                            "artifact": None,
+                            "runtime_type": (
+                                "php"
+                                if s_cfg.get("server_flavor") == "pocketmine"
+                                else "java"
+                            ),
+                            "launch_arguments": [],
+                            "install_schema_version": 1,
+                            "java_policy": "strict",
+                        },
+                    )
+        return raw
+
     def _normalize(self, config: dict[str, Any]) -> dict[str, Any]:
-        normalized = _deep_merge(DEFAULT_CONFIG, config)
+        migrated = self._migrate_schema(config)
+        normalized = _deep_merge(DEFAULT_CONFIG, migrated)
         normalized["servers"] = normalized.get("servers", {}) or {}
         for server_name, server_config in list(normalized["servers"].items()):
             normalized["servers"][server_name] = _deep_merge(
@@ -132,7 +169,9 @@ class ConfigManager:
     def save(self, config: dict[str, Any]) -> dict[str, Any]:
         normalized = self._normalize(config)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        tmp_path = self.path.with_suffix(
+            f"{self.path.suffix}.tmp_{int(time.time() * 1000)}"
+        )
         with tmp_path.open("w", encoding="utf-8") as handle:
             json.dump(normalized, handle, indent=4, sort_keys=True)
         tmp_path.replace(self.path)

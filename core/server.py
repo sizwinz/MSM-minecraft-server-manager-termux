@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-
-import shutil
+import secrets
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime
@@ -14,6 +12,7 @@ from typing import Any
 
 import psutil
 
+from core.adapters import get_flavor_adapter
 from core.constants import (
     AUTO_RESTART_DELAY_SECONDS,
     AUTO_RESTART_POLL_INTERVAL,
@@ -25,6 +24,7 @@ from core.constants import (
     PID_FILE_NAME,
     PLAYIT_ENDPOINT_FILE_NAME,
     PLAYIT_SECRET_FILE_NAME,
+    PROCESS_STATE_FILE_NAME,
     SERVER_FLAVORS,
     SERVER_PROPERTIES_FILE,
     SESSION_FILE_NAME,
@@ -35,16 +35,14 @@ from core.constants import (
     TUNNEL_STATUS_READY,
     TUNNEL_STATUS_SECRET_MISSING,
 )
+from process.base import LaunchSpec, ProcessBackend
+from process.manager import ProcessManager
 from utils.archive import (
     create_backup_archive,
     discover_world_directories,
     safe_extract_zip,
 )
-from utils.network import download_server_binary
-from utils.ngrok import (
-    inspect_ngrok_status,
-    start_ngrok_agent,
-)
+from utils.ngrok import inspect_ngrok_status, start_ngrok_agent
 from utils.playit import (
     build_playit_mapping_hint,
     inspect_playit_status,
@@ -53,22 +51,15 @@ from utils.playit import (
 from utils.properties import load_properties, write_properties
 from utils.rcon import RCONClient, RCONError
 from utils.system import (
-    build_screen_launch_command,
     check_disk_space,
-    detect_php_runtime,
     format_bytes,
-    get_java_path,
     get_local_ipv4_addresses,
-    get_php_path,
     get_screen_name,
     get_server_dir,
     is_pid_running,
     read_pid_file,
     read_text_file,
     remove_file,
-    run_command,
-    screen_session_exists,
-    wait_for_pid_file,
     write_text_file,
 )
 
@@ -81,6 +72,7 @@ class ServerInstance:
         self.config_manager = config_manager
         self.db_manager = db_manager
         self.logger = logger
+        self.process_manager = ProcessManager(logger=self.logger)
         self._lock = threading.RLock()
         self._manual_stop_requested = False
         self.monitor_stop_event = threading.Event()
@@ -106,6 +98,10 @@ class ServerInstance:
         return self.server_dir / PID_FILE_NAME
 
     @property
+    def state_file(self) -> Path:
+        return self.server_dir / PROCESS_STATE_FILE_NAME
+
+    @property
     def session_file(self) -> Path:
         return self.server_dir / SESSION_FILE_NAME
 
@@ -129,9 +125,17 @@ class ServerInstance:
     def screen_name(self) -> str:
         return get_screen_name(self.server_name)
 
+    def get_backend(self) -> ProcessBackend:
+        _config, server_config = self.refresh_config()
+        return self.process_manager.get_backend(
+            self.server_name,
+            self.server_dir,
+            server_config=server_config,
+        )
+
     def get_tunnel_provider(self) -> str:
         _config, server_config = self.refresh_config()
-        return server_config.get("tunnel", {}).get("provider", "ngrok")
+        return server_config.get("tunnel", {}).get("provider", "playit")
 
     def get_tunnel_log_path(self, provider: str | None = None) -> Path:
         selected_provider = provider or self.get_tunnel_provider()
@@ -151,12 +155,7 @@ class ServerInstance:
         return int(server_config.get("server_settings", {}).get("port", default_port))
 
     def current_pid(self) -> int | None:
-        pid = read_pid_file(self.pid_file)
-        if pid and is_pid_running(pid):
-            return pid
-        if pid:
-            remove_file(self.pid_file)
-        return None
+        return self.get_backend().get_pid()
 
     def current_session_id(self) -> int | None:
         raw = read_text_file(self.session_file)
@@ -165,12 +164,7 @@ class ServerInstance:
         return self.db_manager.get_last_open_session(self.server_name)
 
     def is_running(self) -> bool:
-        if not self.pid_file.exists():
-            return False
-        pid = self.current_pid()
-        if pid:
-            return True
-        return screen_session_exists(self.screen_name, logger=self.logger)
+        return self.get_backend().is_running()
 
     def get_connection_info(self) -> dict[str, Any]:
         port = self.get_server_port()
@@ -226,22 +220,6 @@ class ServerInstance:
             "tunnel_setup_url": tunnel_setup_url,
         }
 
-    def _read_tunnel_log_tail(
-        self,
-        provider: str | None = None,
-        line_count: int = 3,
-    ) -> str | None:
-        log_path = self.get_tunnel_log_path(provider)
-        if not log_path.exists():
-            return None
-        try:
-            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            return None
-        if not lines:
-            return None
-        return " | ".join(lines[-line_count:])
-
     def print_connection_details(self) -> None:
         info = self.get_connection_info()
         self.logger.log("INFO", f"Loopback: {info['loopback_endpoint']}")
@@ -261,69 +239,56 @@ class ServerInstance:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def resolve_server_artifact(self, server_config: dict[str, Any]) -> str:
-        flavor = server_config["server_flavor"]
-        flavor_info = SERVER_FLAVORS[flavor]
-        if flavor_info["type"] == "java":
-            explicit = self.server_dir / "server.jar"
-            if explicit.exists():
-                return explicit.name
-            jars = sorted(file.name for file in self.server_dir.glob("*.jar"))
-            if jars:
-                return jars[0]
-            raise RuntimeError("No server JAR file found in the server directory.")
-        phars = sorted(file.name for file in self.server_dir.glob("*.phar"))
-        if phars:
-            return phars[0]
-        raise RuntimeError("No PocketMine PHAR file found in the server directory.")
+        flavor = server_config.get("server_flavor")
+        if not flavor:
+            raise RuntimeError("Server flavor not configured.")
+        adapter = get_flavor_adapter(flavor)
+        return adapter.resolve_artifact(self.server_dir, server_config.get("runtime"))
 
     def build_startup_command(self) -> list[str]:
         config, server_config = self.refresh_config()
         flavor = server_config.get("server_flavor")
-        version = server_config.get("server_version")
-        ram_mb = int(server_config.get("ram_mb", 1024))
-        flavor_info = SERVER_FLAVORS.get(flavor)
-        if not flavor_info or not version:
+        if not flavor:
             raise RuntimeError(
                 "Server is not installed or is missing flavor/version metadata."
             )
-
-        artifact = self.resolve_server_artifact(server_config)
-        if flavor_info["type"] == "java":
-            java_binary = get_java_path(version, config, logger=self.logger)
-            if not java_binary:
-                raise RuntimeError("A compatible Java runtime could not be located.")
-            xms_mb = max(256, min(ram_mb // 2, 1024))
-            return [
-                java_binary,
-                f"-Xmx{ram_mb}M",
-                f"-Xms{xms_mb}M",
-                "-jar",
-                artifact,
-                "nogui",
-            ]
-
-        php_binary = get_php_path(
-            config,
+        adapter = get_flavor_adapter(flavor)
+        return adapter.build_startup_command(
             self.server_dir,
-            auto_install=True,
+            server_config,
+            config,
             logger=self.logger,
         )
-        if not php_binary:
-            raise RuntimeError(
-                "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located."
-            )
-        php_info = detect_php_runtime(php_binary, logger=self.logger)
-        runner_prefix = php_info.get("runner_prefix", [])
-        return runner_prefix + [
-            str(php_binary),
-            f"-dmemory_limit={ram_mb}M",
-            artifact,
-            "--no-wizard",
-        ]
+
+    def _ensure_local_rcon_configured(self, server_config: dict[str, Any]) -> None:
+        """Automatically configure local-only RCON credentials if unconfigured."""
+        rcon_cfg = server_config.setdefault("rcon", {})
+        if not rcon_cfg.get("password"):
+            # Generate a secure local password
+            rcon_cfg["password"] = secrets.token_hex(16)
+            rcon_cfg["enabled"] = True
+            rcon_cfg["host"] = "127.0.0.1"
+            rcon_cfg.setdefault("port", 25575)
+
+            def updater(cfg: dict[str, Any]) -> None:
+                s_cfg = cfg["servers"][self.server_name]
+                s_cfg["rcon"] = rcon_cfg
+
+            self.config_manager.mutate(updater)
 
     def apply_server_files(self) -> None:
         self.ensure_server_files()
         _config, server_config = self.refresh_config()
+        flavor = server_config.get("server_flavor")
+
+        # Auto-configure local RCON for headless backends
+        backend_type = server_config.get("process_backend") or "auto"
+        if backend_type in ("native_posix", "windows", "auto") or not server_config.get(
+            "rcon", {}
+        ).get("password"):
+            self._ensure_local_rcon_configured(server_config)
+            _config, server_config = self.refresh_config()
+
         properties = load_properties(self.server_dir / SERVER_PROPERTIES_FILE)
         properties.update(
             {
@@ -332,7 +297,6 @@ class ServerInstance:
             }
         )
 
-        flavor = server_config.get("server_flavor")
         port = int(
             server_config.get("server_settings", {}).get(
                 "port",
@@ -463,26 +427,83 @@ class ServerInstance:
         self.ensure_server_files()
         if not check_disk_space(self.server_dir, required_mb=500, logger=self.logger):
             raise RuntimeError("Insufficient disk space to install the server binary.")
-        artifact = download_server_binary(
-            flavor,
-            version,
-            version_info,
-            self.server_dir,
+
+        adapter = get_flavor_adapter(flavor)
+        config, _ = self.refresh_config()
+        artifact, runtime_metadata = adapter.install(
+            version=version,
+            version_info=version_info,
+            server_dir=self.server_dir,
+            config=config,
             logger=self.logger,
         )
-        if SERVER_FLAVORS[flavor]["type"] == "java":
+
+        def updater(cfg: dict[str, Any]) -> None:
+            s_cfg = cfg["servers"][self.server_name]
+            s_cfg["server_flavor"] = flavor
+            s_cfg["server_version"] = version
+            s_cfg["runtime"] = runtime_metadata
+
+        self.config_manager.mutate(updater)
+
+        if adapter.runtime_type == "java":
             self.set_eula(True)
-        elif SERVER_FLAVORS[flavor]["type"] == "php":
-            config, _ = self.refresh_config()
-            php_path = get_php_path(
-                config,
-                self.server_dir,
-                auto_install=True,
-                logger=self.logger,
-            )
-            if php_path and self.logger:
-                self.logger.log("SUCCESS", f"PocketMine PHP runtime ready: {php_path}")
+        elif adapter.runtime_type == "php":
+            if self.logger:
+                self.logger.log(
+                    "SUCCESS", f"PocketMine installation ready in {self.server_dir}"
+                )
         return artifact
+
+    def _launch_process(self) -> tuple[bool, int | None]:
+        """Unified internal method for launching the server process
+        across normal start and auto-restart."""
+        config, server_config = self.refresh_config()
+        flavor = server_config.get("server_flavor")
+        version = server_config.get("server_version")
+        if not flavor or not version:
+            raise RuntimeError(
+                "Server is not installed or is missing flavor/version metadata."
+            )
+
+        adapter = get_flavor_adapter(flavor)
+        valid, reason = adapter.validate_installation(
+            self.server_dir, server_config.get("runtime")
+        )
+        if not valid:
+            raise RuntimeError(f"Installation check failed: {reason}")
+
+        startup_command = adapter.build_startup_command(
+            self.server_dir,
+            server_config,
+            config,
+            logger=self.logger,
+        )
+
+        log_file = self.server_dir / "logs" / "latest.log"
+        rcon_cfg = server_config.get("rcon", {})
+
+        spec = LaunchSpec(
+            server_name=self.server_name,
+            command=startup_command,
+            cwd=self.server_dir,
+            log_file=log_file,
+            state_file=self.state_file,
+            pid_file=self.pid_file,
+            rcon_host=rcon_cfg.get("host", "127.0.0.1"),
+            rcon_port=(
+                int(rcon_cfg.get("port", 25575)) if rcon_cfg.get("port") else None
+            ),
+            rcon_password=rcon_cfg.get("password"),
+            screen_name=self.screen_name,
+        )
+
+        backend = self.get_backend()
+        state = backend.start(spec)
+        pid = state.pid if state else backend.get_pid()
+        if not pid or not backend.is_running():
+            return False, None
+        return True, pid
 
     def start(self) -> bool:
         with self._lock:
@@ -495,82 +516,17 @@ class ServerInstance:
             self.monitor_stop_event = threading.Event()
             self.auto_restart_stop_event = threading.Event()
             self.backup_stop_event = threading.Event()
+
             try:
-                startup_command = self.build_startup_command()
+                started, pid = self._launch_process()
             except RuntimeError as exc:
                 self.logger.log("ERROR", f"Cannot start {self.server_name}: {exc}")
                 return False
-            startup_log = self.server_dir / "logs" / "latest.log"
-            startup_log.parent.mkdir(parents=True, exist_ok=True)
-            if shutil.which("screen") is None:
-                try:
-                    startup_log_handle = startup_log.open(
-                        "a", encoding="utf-8", errors="replace"
-                    )
-                    creationflags = 0
-                    if sys.platform == "win32":
-                        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-                            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
-                        if hasattr(subprocess, "DETACHED_PROCESS"):
-                            creationflags |= subprocess.DETACHED_PROCESS
 
-                    proc = subprocess.Popen(
-                        startup_command,
-                        cwd=self.server_dir,
-                        stdout=startup_log_handle,
-                        stderr=subprocess.STDOUT,
-                        creationflags=creationflags,
-                        close_fds=(sys.platform != "win32"),
-                    )
-                    write_text_file(self.pid_file, str(proc.pid))
-                    started = True
-                except Exception as exc:
-                    self.logger.log(
-                        "ERROR", f"Failed to start {self.server_name}: {exc}"
-                    )
-                    return False
-            else:
-                launch_command = build_screen_launch_command(
-                    self.screen_name,
-                    startup_command,
-                    self.pid_file,
-                    startup_log=startup_log,
-                )
-                started = run_command(
-                    launch_command, logger=self.logger, cwd=self.server_dir
-                )
-                if not started:
-                    self.logger.log(
-                        "ERROR", f"Failed to start {self.server_name} in screen."
-                    )
-                    return False
-            pid = wait_for_pid_file(self.pid_file)
-            if not pid:
-                recent_err = ""
-                if startup_log.exists():
-                    try:
-                        lines = [
-                            ln.strip()
-                            for ln in startup_log.read_text(
-                                encoding="utf-8", errors="replace"
-                            ).splitlines()
-                            if ln.strip()
-                        ]
-                        if lines:
-                            recent_err = lines[-1]
-                    except Exception:
-                        pass
-                if recent_err:
-                    self.logger.log(
-                        "ERROR",
-                        f"Failed to start {self.server_name}: {recent_err}",
-                    )
-                else:
-                    self.logger.log(
-                        "ERROR",
-                        f"Unable to determine a PID for {self.server_name}.",
-                    )
+            if not started or not pid:
+                self.logger.log("ERROR", f"Failed to start {self.server_name}.")
                 return False
+
             _config, server_config = self.refresh_config()
             session_id = self.db_manager.log_session_start(
                 self.server_name,
@@ -592,7 +548,7 @@ class ServerInstance:
         if session_id:
             self.db_manager.log_session_end(session_id)
         remove_file(self.session_file)
-        remove_file(self.pid_file)
+        self.get_backend().clean_stale_state()
 
     def stop_tunnel(self) -> None:
         pid = read_pid_file(self.tunnel_pid_file)
@@ -635,35 +591,29 @@ class ServerInstance:
                 return False
             self._manual_stop_requested = True
             self.stop_background_threads()
+            backend = self.get_backend()
+
             if not force:
                 stopped = self.send_command("stop")
                 if not stopped:
                     self.logger.log(
-                        "WARNING", "Graceful stop failed; falling back to screen."
+                        "WARNING",
+                        "Command dispatch for stop failed; waiting for server exit.",
                     )
                 for _ in range(20):
                     if not self.is_running():
                         break
                     time.sleep(1)
+
             if self.is_running():
-                if shutil.which("screen"):
-                    run_command(
-                        ["screen", "-S", self.screen_name, "-X", "quit"],
-                        logger=self.logger,
-                        check=False,
-                    )
-                elif self.pid and is_pid_running(self.pid):
-                    try:
-                        proc = psutil.Process(self.pid)
-                        proc.terminate()
-                    except psutil.Error:
-                        pass
-                for _ in range(5):
-                    if not self.is_running():
-                        break
-                    time.sleep(1)
+                backend.terminate(timeout=5)
+
+            if self.is_running():
+                backend.kill()
+
             self.stop_tunnel()
             self.finalize_session()
+
             if self.is_running():
                 self.logger.log("ERROR", f"Failed to stop {self.server_name}.")
                 return False
@@ -674,6 +624,7 @@ class ServerInstance:
         if not self.is_running():
             self.logger.log("ERROR", f"{self.server_name} is not running.")
             return False
+
         _config, server_config = self.refresh_config()
         rcon_config = server_config.get("rcon", {})
         if rcon_config.get("enabled") and rcon_config.get("password"):
@@ -688,30 +639,16 @@ class ServerInstance:
                     self.logger.log("INFO", response.strip())
                 return True
             except (RCONError, OSError) as exc:
-                self.logger.log(
-                    "WARNING", f"RCON failed, falling back to screen: {exc}"
-                )
+                self.logger.log("WARNING", f"RCON command dispatch failed: {exc}")
 
-        if shutil.which("screen"):
-            result = run_command(
-                [
-                    "screen",
-                    "-S",
-                    self.screen_name,
-                    "-p",
-                    "0",
-                    "-X",
-                    "stuff",
-                    f"{command}\n",
-                ],
-                logger=self.logger,
-                check=False,
-            )
-            return result is not None
+        backend = self.get_backend()
+        if backend.send_command(command):
+            return True
+
         self.logger.log(
             "WARNING",
-            "Command dispatch without GNU screen requires RCON. "
-            "Please enable RCON in server settings.",
+            "Command dispatch requires RCON or Screen backend. "
+            "Please ensure RCON is enabled in server settings.",
         )
         return False
 
@@ -834,19 +771,8 @@ class ServerInstance:
             if self.auto_restart_stop_event.is_set() or self._manual_stop_requested:
                 break
             try:
-                startup_command = self.build_startup_command()
-                launch_command = build_screen_launch_command(
-                    self.screen_name,
-                    startup_command,
-                    self.pid_file,
-                )
-                started = run_command(
-                    launch_command, logger=self.logger, cwd=self.server_dir
-                )
-                if not started:
-                    continue
-                pid = wait_for_pid_file(self.pid_file)
-                if not pid:
+                started, pid = self._launch_process()
+                if not started or not pid:
                     continue
                 _config, server_config = self.refresh_config()
                 session_id = self.db_manager.log_session_start(
@@ -887,7 +813,6 @@ class ServerInstance:
         local_port = tunnel_config.get("local_port") or port
         flavor = server_config.get("server_flavor")
 
-        # Protocol warnings for PocketMine/Bedrock.
         if flavor == "pocketmine":
             if provider == "ngrok":
                 self.logger.log(

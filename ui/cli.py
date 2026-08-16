@@ -5,17 +5,15 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 
 from core.config import ConfigManager
 from core.constants import (
-    CONFIG_FILE,
-    DATABASE_FILE,
     DEFAULT_TUNNEL_BINARIES,
     EULA_FILE,
-    LOG_FILE,
     LOG_RETENTION_DAYS,
     MAX_LOG_SIZE,
     SERVER_FLAVORS,
@@ -124,9 +122,13 @@ def get_terminal_width(
 
 
 def create_services():
-    logger = EnhancedLogger(LOG_FILE, MAX_LOG_SIZE, LOG_RETENTION_DAYS)
-    config_manager = ConfigManager(CONFIG_FILE, logger)
-    db_manager = DatabaseManager(DATABASE_FILE)
+    from platforms.paths import get_path_service
+
+    path_service = get_path_service()
+    path_service.ensure_directories()
+    logger = EnhancedLogger(path_service.log_file, MAX_LOG_SIZE, LOG_RETENTION_DAYS)
+    config_manager = ConfigManager(path_service.config_file, logger)
+    db_manager = DatabaseManager(path_service.database_file)
     runtime = RuntimeManager(config_manager, db_manager, logger)
     return logger, config_manager, db_manager, runtime
 
@@ -1481,14 +1483,14 @@ def show_console(
         logger.log("ERROR", f"{current_server} is not running.")
         pause()
         return
-    if shutil.which("screen") is None:
-        logger.log(
-            "WARNING",
-            "screen is not available in this environment. Use the Live Console Viewer "
-            "to inspect real-time server output.",
-        )
-        pause()
+
+    backend = instance.get_backend()
+    can_attach, attach_cmd_or_reason = backend.attach()
+    if not can_attach:
+        logger.log("WARNING", attach_cmd_or_reason)
+        view_live_console(runtime, config_manager, logger)
         return
+
     print(
         f"\n{C.CYAN}Attaching to {current_server} (screen: {instance.screen_name})...{C.RESET}"
     )
@@ -1517,6 +1519,65 @@ def show_console(
     except FileNotFoundError:
         logger.log("ERROR", "screen is not installed.")
     print(f"\n{C.DIM}Detached from console.{C.RESET}")
+    pause()
+
+
+def show_platform_diagnostics(
+    runtime: RuntimeManager, config_manager: ConfigManager, logger
+) -> None:
+    from platforms.detector import detect_platform
+    from platforms.paths import get_path_service
+
+    platform_desc = detect_platform()
+    path_service = get_path_service()
+    caps = platform_desc.capabilities
+
+    print_header(None, runtime)
+    print(f" {C.BOLD}Platform & Capability Diagnostics{C.RESET}\n")
+
+    print(f"  {C.BOLD}Host System:{C.RESET}")
+    print(f"    OS Type         : {platform_desc.os_type.value}")
+    print(f"    Variant         : {platform_desc.variant.value}")
+    print(
+        f"    Architecture    : {platform_desc.architecture.value} ({platform_desc.raw_arch})"
+    )
+    print(f"    OS Release      : {platform_desc.release}")
+    print(f"    Python Version  : {platform_desc.python_version}")
+    print(f"    Package Manager : {platform_desc.package_manager or 'None detected'}")
+    wsl_str = f"WSL{platform_desc.wsl_version}" if platform_desc.is_wsl else "No"
+    print(f"    WSL Environment : {wsl_str}")
+    print(f"    Termux Android  : {'Yes' if platform_desc.is_termux else 'No'}")
+
+    pmmp_str = "Supported" if caps.supports_pocketmine_binary else "Manual PHP Required"
+    java_prov_str = (
+        "Supported" if caps.supports_java_provisioning else "System packages only"
+    )
+    attach_str = "Supported" if caps.supports_console_attachment else "Logs tail only"
+
+    print(f"\n  {C.BOLD}Runtime Capabilities:{C.RESET}")
+    print(f"    Supported Backends: {', '.join(caps.supported_backends)}")
+    print(f"    Default Backend   : {caps.default_backend}")
+    print(f"    Screen Available  : {'Yes' if caps.supports_screen else 'No'}")
+    print(f"    POSIX Signals     : {'Yes' if caps.supports_posix_signals else 'No'}")
+    print(
+        f"    Win Process Groups: {'Yes' if caps.supports_windows_process_groups else 'No'}"
+    )
+    print(f"    PocketMine PMMP   : {pmmp_str}")
+    print(f"    Java Provisioning : {java_prov_str}")
+    print(f"    Console Attachment: {attach_str}")
+
+    print(f"\n  {C.BOLD}Storage & Paths:{C.RESET}")
+    print(f"    Config Dir : {path_service.config_dir}")
+    print(f"    Data Dir   : {path_service.data_dir}")
+    print(f"    Servers Dir: {path_service.servers_dir}")
+    print(f"    Logs Dir   : {path_service.logs_dir}")
+
+    if caps.notes:
+        print(f"\n  {C.BOLD}Diagnostic Notes:{C.RESET}")
+        for note in caps.notes:
+            print(f"    • {note}")
+
+    print()
     pause()
 
 
@@ -1668,9 +1729,10 @@ def server_management_menu(
         print(f" {C.BOLD}Server Instance Manager{C.RESET}\n")
         print(" [ 1] Switch Active Server")
         print(" [ 2] Create New Server")
+        print(" [ 3] Platform & Capability Diagnostics")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-2]: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose action [0-3]: {C.RESET}").strip()
         if choice == "0":
             return
         if choice == "1":
@@ -1679,12 +1741,22 @@ def server_management_menu(
         elif choice == "2":
             create_new_server(config_manager, logger)
             pause()
+        elif choice == "3":
+            show_platform_diagnostics(runtime, config_manager, logger)
         else:
             logger.log("ERROR", "Invalid choice.")
             pause()
 
 
 def main() -> None:
+    if "--diagnostics" in sys.argv or "-d" in sys.argv:
+        import json
+        from platforms.detector import detect_platform
+
+        desc = detect_platform()
+        print(json.dumps(desc.to_dict(), indent=2))
+        return
+
     logger, config_manager, db_manager, runtime = create_services()
     if not check_base_dependencies(logger):
         raise SystemExit(1)
@@ -1736,9 +1808,10 @@ def main() -> None:
         print(" [ 7] Install / update server flavor & version")
         print(" [ 8] Switch / create server")
         print(" [ 9] Statistics & Performance")
+        print(" [10] Platform & System Diagnostics")
         print(" [ 0] Exit")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-9]: {C.RESET}").strip()
+        choice = input(f"\n{C.BOLD}Choose action [0-10]: {C.RESET}").strip()
         try:
             if choice == "1":
                 started = instance.start()
@@ -1764,6 +1837,8 @@ def main() -> None:
                 server_management_menu(runtime, config_manager, logger)
             elif choice == "9":
                 show_statistics(runtime, config_manager, db_manager)
+            elif choice == "10" or choice.lower() == "d":
+                show_platform_diagnostics(runtime, config_manager, logger)
             elif choice == "0":
                 if runtime.running_servers():
                     leave_running = (
