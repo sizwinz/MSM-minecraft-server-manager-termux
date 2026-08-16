@@ -168,39 +168,39 @@ as_install_user() {
 }
 
 is_termux() {
-    [ -n "${PREFIX:-}" ] && [[ "${PREFIX}" == *"/com.termux/"* ]] && command -v pkg >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "termux" ] || { [ -z "${MSM_DISTRO:-}" ] && [ -n "${PREFIX:-}" ] && [[ "${PREFIX}" == *"/com.termux/"* ]] && command -v pkg >/dev/null 2>&1; }
 }
 
 is_debian_like() {
-    command -v apt-get >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "debian" ] || { [ -z "${MSM_DISTRO:-}" ] && command -v apt-get >/dev/null 2>&1; }
 }
 
 is_arch_like() {
-    command -v pacman >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "arch" ] || { [ -z "${MSM_DISTRO:-}" ] && command -v pacman >/dev/null 2>&1; }
 }
 
 is_fedora_like() {
-    command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "fedora" ] || { [ -z "${MSM_DISTRO:-}" ] && { command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; }; }
 }
 
 is_alpine_like() {
-    command -v apk >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "alpine" ] || { [ -z "${MSM_DISTRO:-}" ] && command -v apk >/dev/null 2>&1; }
 }
 
 is_suse_like() {
-    command -v zypper >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "suse" ] || { [ -z "${MSM_DISTRO:-}" ] && command -v zypper >/dev/null 2>&1; }
 }
 
 is_void_like() {
-    command -v xbps-install >/dev/null 2>&1
+    [ "${MSM_DISTRO:-}" = "void" ] || { [ -z "${MSM_DISTRO:-}" ] && command -v xbps-install >/dev/null 2>&1; }
 }
 
 is_freebsd() {
-    [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]
+    [ "${MSM_DISTRO:-}" = "freebsd" ] || { [ -z "${MSM_DISTRO:-}" ] && [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; }
 }
 
 is_macos() {
-    [ "${MSM_PLATFORM:-}" = "macos" ] || [ "$(uname -s 2>/dev/null)" = "Darwin" ]
+    [ "${MSM_PLATFORM:-}" = "macos" ] || [ "${MSM_DISTRO:-}" = "macos" ] || { [ -z "${MSM_DISTRO:-}" ] && [ "$(uname -s 2>/dev/null)" = "Darwin" ]; }
 }
 
 setup_privilege() {

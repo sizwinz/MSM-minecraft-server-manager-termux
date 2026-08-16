@@ -76,7 +76,20 @@ class NativePosixBackend(ProcessBackend):
             self.clean_stale_state()
             return True
 
-        self.send_command("stop")
+        state = self.read_state()
+        if state:
+            if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+                try:
+                    pgid = os.getpgid(state.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            else:
+                try:
+                    os.kill(state.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             if not self.is_running():
@@ -84,7 +97,11 @@ class NativePosixBackend(ProcessBackend):
                 return True
             time.sleep(0.5)
 
-        return not self.is_running()
+        if not self.is_running():
+            self.clean_stale_state()
+            return True
+
+        return self.terminate(timeout=5)
 
     def terminate(self, timeout: int = 5) -> bool:
         state = self.read_state()

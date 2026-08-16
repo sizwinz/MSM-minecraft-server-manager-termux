@@ -146,7 +146,7 @@ def test_arch_install_uses_pacman(tmp_path: Path) -> None:
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
     _write_stub(fake_bin, "sudo", 'exec "$@"\n')
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": ""})
+    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_DISTRO": "arch"})
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "sudo pacman -Sy" in result.stdout
@@ -164,7 +164,7 @@ def test_fedora_install_uses_dnf(tmp_path: Path) -> None:
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
     _write_stub(fake_bin, "sudo", 'exec "$@"\n')
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": ""})
+    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_DISTRO": "fedora"})
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "sudo dnf check-update" in result.stdout
@@ -181,7 +181,7 @@ def test_alpine_install_uses_apk(tmp_path: Path) -> None:
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
     _write_stub(fake_bin, "sudo", 'exec "$@"\n')
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": ""})
+    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_DISTRO": "alpine"})
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "sudo apk update" in result.stdout
@@ -199,7 +199,7 @@ def test_suse_install_uses_zypper(tmp_path: Path) -> None:
     _write_stub(fake_bin, "id", "printf '1000\\n'\n")
     _write_stub(fake_bin, "sudo", 'exec "$@"\n')
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": ""})
+    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_DISTRO": "suse"})
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "sudo zypper refresh -f" in result.stdout
@@ -221,7 +221,11 @@ def test_macos_install_uses_brew_without_sudo(tmp_path: Path) -> None:
     )
     _write_stub(fake_bin, "id", "printf '501\\n'\n")
 
-    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_PLATFORM": "macos"})
+    result = _run_installer(
+        tmp_path,
+        fake_bin,
+        {"PREFIX": "", "MSM_PLATFORM": "macos", "MSM_DISTRO": "macos"},
+    )
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "Updating Homebrew" in result.stdout
@@ -239,7 +243,7 @@ def test_unrecognized_distribution_proceeds_with_warning(tmp_path: Path) -> None
     result = _run_installer(
         tmp_path,
         fake_bin,
-        {"PREFIX": "", "PATH": str(fake_bin)},
+        {"PREFIX": "", "MSM_DISTRO": "unsupported", "PATH": str(fake_bin)},
     )
 
     assert result.returncode == 0
