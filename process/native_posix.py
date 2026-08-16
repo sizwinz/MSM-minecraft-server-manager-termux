@@ -55,7 +55,17 @@ class NativePosixBackend(ProcessBackend):
         state.save(self.state_file)
         return state
 
+    def _reap_if_child(self, pid: int | None) -> None:
+        if pid and hasattr(os, "waitpid") and hasattr(os, "WNOHANG"):
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+
     def is_running(self) -> bool:
+        state = ProcessState.load(self.state_file)
+        if state:
+            self._reap_if_child(state.pid)
         state = self.read_state()
         return state is not None
 

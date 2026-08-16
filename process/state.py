@@ -85,6 +85,11 @@ class ProcessState:
             proc = psutil.Process(self.pid)
             if not proc.is_running():
                 return False
+            try:
+                if proc.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                    return False
+            except (psutil.Error, OSError):
+                return False
 
             # Check creation time with tolerance (within 3 seconds)
             if self.create_time > 0:
