@@ -152,7 +152,11 @@ run() {
 }
 
 priv() {
-    run "${SUDO_CMD[@]}" "$@"
+    if [ ${#SUDO_CMD[@]} -gt 0 ]; then
+        run "${SUDO_CMD[@]}" "$@"
+    else
+        run "$@"
+    fi
 }
 
 as_install_user() {
@@ -391,7 +395,12 @@ configure_python_environment() {
     if [ -d ".venv" ] && [ ! -w ".venv" ]; then
         priv rm -rf .venv
     fi
-    as_install_user "${python_bin}" -m venv "${venv_args[@]}" .venv
+
+    if [ ${#venv_args[@]} -gt 0 ]; then
+        as_install_user "${python_bin}" -m venv "${venv_args[@]}" .venv
+    else
+        as_install_user "${python_bin}" -m venv .venv
+    fi
 
     as_install_user .venv/bin/python -m pip install --upgrade pip
     as_install_user .venv/bin/python -m pip install -r requirements.txt

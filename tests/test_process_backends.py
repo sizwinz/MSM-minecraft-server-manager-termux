@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
+
 import psutil
 import pytest
 
@@ -112,9 +114,10 @@ def test_screen_backend_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "screen -r mc_test" in attach_cmd
 
 
-def test_native_posix_backend_lifecycle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+@pytest.mark.skipif(
+    os.name == "nt", reason="Native POSIX backend lifecycle requires POSIX OS"
+)
+def test_native_posix_backend_lifecycle(tmp_path: Path):
     server_dir = tmp_path / "server"
     server_dir.mkdir()
     state_file = server_dir / ".msm.process.json"
@@ -123,10 +126,10 @@ def test_native_posix_backend_lifecycle(
 
     backend = NativePosixBackend("test_posix", server_dir, state_file, pid_file)
 
-    # Launch a quick non-blocking helper
+    # Launch using sys.executable with adequate sleep for lifecycle check
     spec = LaunchSpec(
         server_name="test_posix",
-        command=["python", "-c", "import time; time.sleep(0.5)"],
+        command=[sys.executable, "-c", "import time; time.sleep(10)"],
         cwd=server_dir,
         log_file=log_file,
         state_file=state_file,
@@ -141,11 +144,14 @@ def test_native_posix_backend_lifecycle(
     assert can_attach is False
     assert "Interactive console attachment is not available" in reason
 
-    stopped = backend.graceful_stop(timeout=2)
+    stopped = backend.graceful_stop(timeout=5)
     assert stopped is True
     assert backend.is_running() is False
 
 
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows backend lifecycle requires Windows OS"
+)
 def test_windows_backend_lifecycle(tmp_path: Path):
     server_dir = tmp_path / "server"
     server_dir.mkdir()
@@ -156,7 +162,7 @@ def test_windows_backend_lifecycle(tmp_path: Path):
     backend = WindowsBackend("test_win", server_dir, state_file, pid_file)
     spec = LaunchSpec(
         server_name="test_win",
-        command=["python", "-c", "import time; time.sleep(0.5)"],
+        command=[sys.executable, "-c", "import time; time.sleep(10)"],
         cwd=server_dir,
         log_file=log_file,
         state_file=state_file,
@@ -171,7 +177,7 @@ def test_windows_backend_lifecycle(tmp_path: Path):
     assert can_attach is False
     assert "Console attachment is not available" in reason
 
-    stopped = backend.terminate(timeout=2)
+    stopped = backend.terminate(timeout=5)
     assert stopped is True
     assert backend.is_running() is False
 
