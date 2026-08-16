@@ -490,7 +490,11 @@ class ServerInstance:
             self.monitor_stop_event = threading.Event()
             self.auto_restart_stop_event = threading.Event()
             self.backup_stop_event = threading.Event()
-            startup_command = self.build_startup_command()
+            try:
+                startup_command = self.build_startup_command()
+            except RuntimeError as exc:
+                self.logger.log("ERROR", f"Cannot start {self.server_name}: {exc}")
+                return False
             startup_log = self.server_dir / "logs" / "latest.log"
             startup_log.parent.mkdir(parents=True, exist_ok=True)
             launch_command = build_screen_launch_command(

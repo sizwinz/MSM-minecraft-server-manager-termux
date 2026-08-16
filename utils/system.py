@@ -557,20 +557,13 @@ def get_php_path(
             if logger:
                 logger.log("WARNING", f"Auto-download of PHP binary failed: {exc}")
 
-    # 6. Fallback to system PHP with warning if available
-    if system_php:
-        if logger:
-            logger.log(
-                "WARNING",
-                "Using system PHP binary. If PocketMine fails to start, "
-                "install the official PMMP PHP binary compiled with ZTS and pmmpthread.",
-            )
-        return system_php
-
     if logger:
         logger.log(
             "ERROR",
-            "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located.",
+            "A compatible PocketMine PHP runtime (ZTS + pmmpthread) could not be located.\n"
+            "Standard system PHP packages lack required thread-safety and PMMP extensions.\n"
+            "Please configure 'php_path' in ~/.config/msm/config.json or place a compatible "
+            "PMMP PHP binary in ~/.config/msm/php or <server>/bin/.",
         )
     return None
 

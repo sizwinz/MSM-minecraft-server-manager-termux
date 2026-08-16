@@ -602,58 +602,80 @@ def download_php_binary(
         if not isinstance(releases, list):
             return None
 
-        matched_asset = None
-        for release in releases:
-            if release.get("draft"):
-                continue
-            for asset in release.get("assets", []):
-                name = asset.get("name", "")
-                name_lower = name.lower()
-                if (
-                    name_lower.startswith("z-")
-                    or "debug" in name_lower
-                    or "symbols" in name_lower
-                ):
-                    continue
+        target_filters = []
+        if os_name == "Android":
+            if arch in ("arm64", "aarch64"):
+                target_filters.append(
+                    lambda n: "android" in n and ("arm64" in n or "aarch64" in n)
+                )
+                target_filters.append(
+                    lambda n: "linux" in n and ("arm64" in n or "aarch64" in n)
+                )
+            elif arch in ("x86_64", "amd64", "x64"):
+                target_filters.append(
+                    lambda n: "android" in n
+                    and ("x86_64" in n or "x64" in n or "amd64" in n)
+                )
+                target_filters.append(
+                    lambda n: "linux" in n
+                    and ("x86_64" in n or "x64" in n or "amd64" in n)
+                )
+            elif arch in ("arm", "armv7l", "armv7", "armhf"):
+                target_filters.append(
+                    lambda n: "android" in n and ("arm" in n or "armv7" in n)
+                )
+        elif os_name == "Linux":
+            if arch in ("x86_64", "amd64", "x64"):
+                target_filters.append(
+                    lambda n: "linux" in n
+                    and ("x86_64" in n or "x64" in n or "amd64" in n)
+                )
+            elif arch in ("arm64", "aarch64"):
+                target_filters.append(
+                    lambda n: "linux" in n and ("arm64" in n or "aarch64" in n)
+                )
+                target_filters.append(
+                    lambda n: "android" in n and ("arm64" in n or "aarch64" in n)
+                )
+        elif os_name == "Windows":
+            target_filters.append(
+                lambda n: "windows" in n and ("x64" in n or "x86_64" in n)
+            )
+        elif os_name == "MacOS":
+            if arch in ("arm64", "aarch64"):
+                target_filters.append(
+                    lambda n: ("macos" in n or "darwin" in n)
+                    and ("arm64" in n or "aarch64" in n)
+                )
+            else:
+                target_filters.append(
+                    lambda n: ("macos" in n or "darwin" in n)
+                    and ("x86_64" in n or "x64" in n)
+                )
+        else:
+            target_filters.append(
+                lambda n: "linux" in n and ("x86_64" in n or "x64" in n)
+            )
 
-                if os_name == "Android" and arch == "arm64":
-                    if "android" in name_lower and (
-                        "arm64" in name_lower or "aarch64" in name_lower
+        matched_asset = None
+        for check_fn in target_filters:
+            for release in releases:
+                if release.get("draft"):
+                    continue
+                for asset in release.get("assets", []):
+                    name = asset.get("name", "")
+                    name_lower = name.lower()
+                    if (
+                        name_lower.startswith("z-")
+                        or "debug" in name_lower
+                        or "symbols" in name_lower
                     ):
+                        continue
+                    if check_fn(name_lower):
                         matched_asset = asset
                         break
-                elif os_name == "Linux" and arch == "x86_64":
-                    if "linux" in name_lower and (
-                        "x86_64" in name_lower
-                        or "x64" in name_lower
-                        or "amd64" in name_lower
-                    ):
-                        matched_asset = asset
-                        break
-                elif os_name == "Linux" and arch == "arm64":
-                    if "linux" in name_lower and (
-                        "arm64" in name_lower or "aarch64" in name_lower
-                    ):
-                        matched_asset = asset
-                        break
-                elif os_name == "Windows":
-                    if "windows" in name_lower and (
-                        "x64" in name_lower or "x86_64" in name_lower
-                    ):
-                        matched_asset = asset
-                        break
-                elif os_name == "MacOS":
-                    if "macos" in name_lower or "darwin" in name_lower:
-                        if arch == "arm64" and (
-                            "arm64" in name_lower or "aarch64" in name_lower
-                        ):
-                            matched_asset = asset
-                            break
-                        elif arch == "x86_64" and (
-                            "x86_64" in name_lower or "x64" in name_lower
-                        ):
-                            matched_asset = asset
-                            break
+                if matched_asset:
+                    break
             if matched_asset:
                 break
 

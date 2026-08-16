@@ -204,6 +204,62 @@ def test_download_php_binary_matches_android_arm64_asset(
     assert "php" in php_bin.name
 
 
+def test_download_php_binary_fallback_for_android_x86_64(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    class DummyResponse:
+        def __init__(self, payload, status_code=200):
+            self._payload = payload
+            self.status_code = status_code
+
+        def json(self):
+            return self._payload
+
+        def iter_content(self, chunk_size=1024):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                ti = tarfile.TarInfo(name="bin/php7/bin/php")
+                data = b"#!/bin/sh\n"
+                ti.size = len(data)
+                ti.mode = 0o755
+                tar.addfile(ti, io.BytesIO(data))
+            buf.seek(0)
+            yield buf.read()
+
+    releases_payload = [
+        {
+            "tag_name": "pm5-php-8.4-latest",
+            "draft": False,
+            "assets": [
+                {
+                    "name": "PHP-8.4-Linux-x86_64-PM5.tar.gz",
+                    "browser_download_url": "https://example/linux.tar.gz",
+                },
+                {
+                    "name": "PHP-8.4-Android-arm64-PM5.tar.gz",
+                    "browser_download_url": "https://example/android.tar.gz",
+                },
+            ],
+        }
+    ]
+
+    def fake_request(_session, _method, url, logger=None, **kwargs):
+        if url.endswith("/releases"):
+            return DummyResponse(releases_payload)
+        return DummyResponse(None)
+
+    monkeypatch.setattr("utils.network.safe_request", fake_request)
+    monkeypatch.setattr(
+        "utils.network.get_system_arch_and_os", lambda: ("Android", "x86_64")
+    )
+
+    dest_dir = tmp_path / "msm_php_x86_64"
+    php_bin = download_php_binary(target_dir=dest_dir)
+    assert php_bin is not None
+    assert php_bin.exists()
+    assert "php" in php_bin.name
+
+
 def test_pocketmine_startup_command_and_server_properties(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
