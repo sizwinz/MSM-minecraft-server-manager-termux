@@ -168,7 +168,9 @@ def test_fedora_install_uses_dnf(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr + result.stdout
     assert "sudo dnf check-update" in result.stdout
-    assert "sudo dnf install -y git screen python3 python3-pip curl gnupg" in result.stdout
+    assert (
+        "sudo dnf install -y git screen python3 python3-pip curl gnupg" in result.stdout
+    )
 
 
 def test_alpine_install_uses_apk(tmp_path: Path) -> None:

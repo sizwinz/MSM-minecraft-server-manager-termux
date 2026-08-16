@@ -1481,6 +1481,14 @@ def show_console(
         logger.log("ERROR", f"{current_server} is not running.")
         pause()
         return
+    if shutil.which("screen") is None:
+        logger.log(
+            "WARNING",
+            "screen is not available in this environment. Use the Live Console Viewer "
+            "to inspect real-time server output.",
+        )
+        pause()
+        return
     print(
         f"\n{C.CYAN}Attaching to {current_server} (screen: {instance.screen_name})...{C.RESET}"
     )

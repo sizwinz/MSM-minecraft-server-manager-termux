@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -500,20 +502,48 @@ class ServerInstance:
                 return False
             startup_log = self.server_dir / "logs" / "latest.log"
             startup_log.parent.mkdir(parents=True, exist_ok=True)
-            launch_command = build_screen_launch_command(
-                self.screen_name,
-                startup_command,
-                self.pid_file,
-                startup_log=startup_log,
-            )
-            started = run_command(
-                launch_command, logger=self.logger, cwd=self.server_dir
-            )
-            if not started:
-                self.logger.log(
-                    "ERROR", f"Failed to start {self.server_name} in screen."
+            if shutil.which("screen") is None:
+                try:
+                    startup_log_handle = startup_log.open(
+                        "a", encoding="utf-8", errors="replace"
+                    )
+                    creationflags = 0
+                    if sys.platform == "win32":
+                        if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+                            creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+                        if hasattr(subprocess, "DETACHED_PROCESS"):
+                            creationflags |= subprocess.DETACHED_PROCESS
+
+                    proc = subprocess.Popen(
+                        startup_command,
+                        cwd=self.server_dir,
+                        stdout=startup_log_handle,
+                        stderr=subprocess.STDOUT,
+                        creationflags=creationflags,
+                        close_fds=(sys.platform != "win32"),
+                    )
+                    write_text_file(self.pid_file, str(proc.pid))
+                    started = True
+                except Exception as exc:
+                    self.logger.log(
+                        "ERROR", f"Failed to start {self.server_name}: {exc}"
+                    )
+                    return False
+            else:
+                launch_command = build_screen_launch_command(
+                    self.screen_name,
+                    startup_command,
+                    self.pid_file,
+                    startup_log=startup_log,
                 )
-                return False
+                started = run_command(
+                    launch_command, logger=self.logger, cwd=self.server_dir
+                )
+                if not started:
+                    self.logger.log(
+                        "ERROR", f"Failed to start {self.server_name} in screen."
+                    )
+                    return False
             pid = wait_for_pid_file(self.pid_file)
             if not pid:
                 recent_err = ""
@@ -616,11 +646,18 @@ class ServerInstance:
                         break
                     time.sleep(1)
             if self.is_running():
-                run_command(
-                    ["screen", "-S", self.screen_name, "-X", "quit"],
-                    logger=self.logger,
-                    check=False,
-                )
+                if shutil.which("screen"):
+                    run_command(
+                        ["screen", "-S", self.screen_name, "-X", "quit"],
+                        logger=self.logger,
+                        check=False,
+                    )
+                elif self.pid and is_pid_running(self.pid):
+                    try:
+                        proc = psutil.Process(self.pid)
+                        proc.terminate()
+                    except psutil.Error:
+                        pass
                 for _ in range(5):
                     if not self.is_running():
                         break
@@ -655,21 +692,28 @@ class ServerInstance:
                     "WARNING", f"RCON failed, falling back to screen: {exc}"
                 )
 
-        result = run_command(
-            [
-                "screen",
-                "-S",
-                self.screen_name,
-                "-p",
-                "0",
-                "-X",
-                "stuff",
-                f"{command}\n",
-            ],
-            logger=self.logger,
-            check=False,
+        if shutil.which("screen"):
+            result = run_command(
+                [
+                    "screen",
+                    "-S",
+                    self.screen_name,
+                    "-p",
+                    "0",
+                    "-X",
+                    "stuff",
+                    f"{command}\n",
+                ],
+                logger=self.logger,
+                check=False,
+            )
+            return result is not None
+        self.logger.log(
+            "WARNING",
+            "Command dispatch without GNU screen requires RCON. "
+            "Please enable RCON in server settings.",
         )
-        return result is not None
+        return False
 
     def resume_background_services(self) -> None:
         if not self.is_running():
