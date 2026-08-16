@@ -66,6 +66,11 @@ def run_command(
             pass
         exec_env.setdefault("TMPDIR", termux_tmp)
         exec_env.setdefault("SCREENDIR", termux_tmp)
+        if command and any(
+            token in str(command[0]).lower()
+            for token in ("grun", "glibc-runner", "proot")
+        ):
+            exec_env.pop("LD_PRELOAD", None)
     try:
         if logger:
             logger.log(
@@ -185,10 +190,18 @@ def build_screen_launch_command(
     startup_log: str | os.PathLike[str] | None = None,
 ) -> list[str]:
     shell = shutil.which("bash") or shutil.which("sh") or "sh"
-    shell_script = (
-        f"echo $$ > {shlex.quote(str(pid_file))}; "
-        f"exec {shlex.join(startup_command)}"
-    )
+    pre_cmds = [f"echo $$ > {shlex.quote(str(pid_file))}"]
+    if (
+        running_on_termux()
+        and startup_command
+        and any(
+            token in str(startup_command[0]).lower()
+            for token in ("grun", "glibc-runner", "proot")
+        )
+    ):
+        pre_cmds.append("unset LD_PRELOAD")
+    pre_script = "; ".join(pre_cmds)
+    shell_script = f"{pre_script}; " f"exec {shlex.join(startup_command)}"
     return ["screen", "-dmS", screen_name, shell, "-c", shell_script]
 
 
@@ -462,8 +475,26 @@ def detect_php_runtime(php_binary: str | Path | None, logger=None) -> dict[str, 
     if (
         not result or result.returncode != 0 or not result.stdout
     ) and running_on_termux():
-        for runner_name in ("glibc-runner", "grun"):
+        for runner_name in ("grun", "glibc-runner"):
             if shutil.which(runner_name):
+                # Try patching the ELF interpreter first with runner --set
+                run_command(
+                    [runner_name, "--set", bin_path],
+                    logger=logger,
+                    check=False,
+                    capture_output=True,
+                )
+                direct_res = run_command(
+                    [bin_path, "-v"],
+                    logger=logger,
+                    check=False,
+                    capture_output=True,
+                )
+                if direct_res and direct_res.returncode == 0 and direct_res.stdout:
+                    runner_prefix = []
+                    result = direct_res
+                    break
+
                 glibc_res = run_command(
                     [runner_name, bin_path, "-v"],
                     logger=logger,

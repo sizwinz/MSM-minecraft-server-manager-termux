@@ -584,7 +584,9 @@ def download_php_binary(
     target_dir: str | Path | None = None,
     logger=None,
 ) -> Path | None:
+    import shutil
     from utils.archive import safe_extract_tar, safe_extract_zip
+    from utils.system import running_on_termux
 
     dest_dir = Path(target_dir) if target_dir else PHP_DIR
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -725,6 +727,22 @@ def download_php_binary(
                         item.chmod(0o755)
                 except OSError:
                     pass
+
+        if running_on_termux():
+            runner = shutil.which("grun") or shutil.which("glibc-runner")
+            if runner:
+                from utils.system import run_command
+
+                for cand in dest_dir.rglob("*"):
+                    if cand.is_file() and (
+                        cand.name in ("php", "php.exe") or cand.suffix in (".so", "")
+                    ):
+                        run_command(
+                            [runner, "--set", str(cand)],
+                            logger=logger,
+                            check=False,
+                            capture_output=True,
+                        )
 
         for candidate_rel in (
             Path("bin/php7/bin/php"),
