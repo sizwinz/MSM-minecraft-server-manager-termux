@@ -953,26 +953,60 @@ def create_new_server(config_manager: ConfigManager, logger) -> None:
     logger.log("SUCCESS", f"Created server '{sanitized_name}'.")
 
 
-def select_current_server(config_manager: ConfigManager, logger) -> None:
+def select_current_server(
+    config_manager: ConfigManager,
+    logger,
+    runtime: RuntimeManager | None = None,
+) -> str | None:
+    from platforms.paths import get_path_service
+
+    path_service = get_path_service()
     config = config_manager.load()
     servers = list(config.get("servers", {}))
     if not servers:
         logger.log("ERROR", "No servers are configured.")
-        return
-    print(f"{C.BOLD}Configured servers:{C.RESET}")
+        return None
+
+    print(f"\n {C.BOLD}Configured Servers ({len(servers)}):{C.RESET}\n")
     for index, server_name in enumerate(servers, start=1):
-        print(f" {index}. {server_name}")
-    choice = input(f"\n{C.BOLD}Choose server: {C.RESET}").strip()
+        s_cfg = config.get("servers", {}).get(server_name, {})
+        flavor = s_cfg.get("server_flavor")
+        flavor_name = SERVER_FLAVORS.get(flavor, {}).get("name", "Not installed")
+        version = s_cfg.get("server_version") or "N/A"
+        server_dir = path_service.resolve_server_dir(server_name, config)
+
+        status_text = ""
+        if runtime:
+            inst = runtime.get_instance(server_name)
+            status_text = (
+                f"  [{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}]"
+                if inst.is_running()
+                else f"  [{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}]"
+            )
+
+        print(f" [{index:2d}] {C.BOLD}{server_name}{C.RESET}{status_text}")
+        print(f"      {C.DIM}Type     :{C.RESET} {flavor_name} {version}")
+        print(f"      {C.DIM}Directory:{C.RESET} {server_dir}")
+        print()
+
+    choice = input(
+        f"{C.BOLD}Choose server [1-{len(servers)}] (or Enter to cancel): {C.RESET}"
+    ).strip()
+    if not choice:
+        return None
     if not choice.isdigit():
         logger.log("ERROR", "Selection must be a number.")
-        return
+        return None
     selection = int(choice) - 1
     if selection < 0 or selection >= len(servers):
         logger.log("ERROR", "Invalid server selection.")
-        return
-    config["current_server"] = servers[selection]
+        return None
+
+    chosen = servers[selection]
+    config["current_server"] = chosen
     config_manager.save(config)
-    logger.log("SUCCESS", f"Switched to server '{servers[selection]}'.")
+    logger.log("SUCCESS", f"Switched to server '{chosen}'.")
+    return chosen
 
 
 def select_server_flavor() -> str | None:
@@ -1736,7 +1770,7 @@ def server_management_menu(
         if choice == "0":
             return
         if choice == "1":
-            select_current_server(config_manager, logger)
+            select_current_server(config_manager, logger, runtime=runtime)
             pause()
         elif choice == "2":
             create_new_server(config_manager, logger)
@@ -1745,6 +1779,80 @@ def server_management_menu(
             show_platform_diagnostics(runtime, config_manager, logger)
         else:
             logger.log("ERROR", "Invalid choice.")
+            pause()
+
+
+def startup_server_picker(
+    runtime: RuntimeManager, config_manager: ConfigManager, logger
+) -> str | None:
+    """Prompt the user on startup to select a server from the configured servers list,
+    displaying full directory paths and runtime statuses."""
+    from platforms.paths import get_path_service
+
+    path_service = get_path_service()
+
+    while True:
+        config = config_manager.load()
+        servers = list(config.get("servers", {}))
+        if not servers:
+            print_header(None, runtime)
+            logger.log("INFO", "No servers found. Create one to begin.")
+            create_new_server(config_manager, logger)
+            pause()
+            continue
+
+        print_header(None, runtime)
+        print(
+            f" {C.BOLD}Select Server to Manage ({len(servers)} available):{C.RESET}\n"
+        )
+
+        for index, server_name in enumerate(servers, start=1):
+            s_cfg = config.get("servers", {}).get(server_name, {})
+            flavor = s_cfg.get("server_flavor")
+            flavor_name = SERVER_FLAVORS.get(flavor, {}).get("name", "Not installed")
+            version = s_cfg.get("server_version") or "N/A"
+            server_dir = path_service.resolve_server_dir(server_name, config)
+            inst = runtime.get_instance(server_name)
+            status = (
+                f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
+                if inst.is_running()
+                else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
+            )
+
+            print(f" [{index:2d}] {C.BOLD}{server_name}{C.RESET}  [{status}]")
+            print(f"      {C.DIM}Type     :{C.RESET} {flavor_name} {version}")
+            print(f"      {C.DIM}Directory:{C.RESET} {server_dir}")
+            print()
+
+        print(f" {C.PRIMARY}── Actions ───────────────────────────────────{C.RESET}")
+        print(" [ +] Create New Server")
+        print(" [ d] Platform & System Diagnostics")
+        print(" [ 0] Exit")
+
+        choice = input(
+            f"\n{C.BOLD}Choose server [1-{len(servers)}] or action: {C.RESET}"
+        ).strip()
+        if choice in ("0", "q", "exit"):
+            return None
+        elif choice in ("+", "c", "new"):
+            create_new_server(config_manager, logger)
+            pause()
+            continue
+        elif choice.lower() == "d":
+            show_platform_diagnostics(runtime, config_manager, logger)
+            continue
+        elif choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(servers):
+                selected = servers[idx]
+                config["current_server"] = selected
+                config_manager.save(config)
+                return selected
+            else:
+                logger.log("ERROR", "Invalid selection number.")
+                pause()
+        else:
+            logger.log("ERROR", "Invalid selection.")
             pause()
 
 
@@ -1761,19 +1869,27 @@ def main() -> None:
     if not check_base_dependencies(logger):
         raise SystemExit(1)
 
+    # Initial server selection on start
+    selected = startup_server_picker(runtime, config_manager, logger)
+    if not selected:
+        if runtime.running_servers():
+            leave_running = (
+                input("Leave running servers active in background after exit? (Y/n): ")
+                .strip()
+                .lower()
+            )
+            if leave_running == "n":
+                for s_name in runtime.running_servers():
+                    runtime.get_instance(s_name).stop()
+        raise SystemExit(0)
+
     while True:
         config = ensure_current_server(config_manager)
-        if not config.get("servers"):
-            print_header(None, runtime)
-            logger.log("INFO", "No servers found. Create one to begin.")
-            create_new_server(config_manager, logger)
-            pause()
-            continue
-
         current_server = config.get("current_server")
-        if not current_server:
-            logger.log("ERROR", "No current server is selected.")
-            pause()
+        if not current_server or current_server not in config.get("servers", {}):
+            selected = startup_server_picker(runtime, config_manager, logger)
+            if not selected:
+                break
             continue
 
         instance = runtime.get_instance(current_server)
@@ -1790,6 +1906,7 @@ def main() -> None:
         print_header(current_server, runtime)
         print(f" {C.BOLD}{current_server}{C.RESET}  [{status}]")
         print(f" {C.DIM}{flavor_name} {version}{C.RESET}")
+        print(f" {C.DIM}Directory: {instance.server_dir}{C.RESET}")
         print()
         print_connection_summary(instance)
         print()
@@ -1809,7 +1926,7 @@ def main() -> None:
         print(" [ 8] Switch / create server")
         print(" [ 9] Statistics & Performance")
         print(" [10] Platform & System Diagnostics")
-        print(" [ 0] Exit")
+        print(" [ 0] Switch Server / Exit")
 
         choice = input(f"\n{C.BOLD}Choose action [0-10]: {C.RESET}").strip()
         try:
@@ -1840,18 +1957,20 @@ def main() -> None:
             elif choice == "10" or choice.lower() == "d":
                 show_platform_diagnostics(runtime, config_manager, logger)
             elif choice == "0":
-                if runtime.running_servers():
-                    leave_running = (
-                        input(
-                            "Leave running servers active in screen after exit? (Y/n): "
+                selected = startup_server_picker(runtime, config_manager, logger)
+                if not selected:
+                    if runtime.running_servers():
+                        leave_running = (
+                            input(
+                                "Leave running servers active in background after exit? (Y/n): "
+                            )
+                            .strip()
+                            .lower()
                         )
-                        .strip()
-                        .lower()
-                    )
-                    if leave_running == "n":
-                        for server_name in runtime.running_servers():
-                            runtime.get_instance(server_name).stop()
-                raise SystemExit(0)
+                        if leave_running == "n":
+                            for server_name in runtime.running_servers():
+                                runtime.get_instance(server_name).stop()
+                    raise SystemExit(0)
             else:
                 logger.log("ERROR", "Invalid menu selection.")
                 pause()

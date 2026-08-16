@@ -56,3 +56,56 @@ def test_corrupted_config_recovery(tmp_path: Path):
     # Corrupted file must be backed up
     bak_files = list(tmp_path.glob("config.json.bak_*"))
     assert len(bak_files) >= 1
+
+
+def test_select_current_server_displays_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    from core.runtime import RuntimeManager
+    from db.manager import DatabaseManager
+    from ui.cli import select_current_server
+
+    config_file = tmp_path / "config.json"
+    logger = EnhancedLogger(tmp_path / "msm.log")
+    cfg_mgr = ConfigManager(config_file, logger)
+    db_mgr = DatabaseManager(tmp_path / "msm.db")
+    runtime = RuntimeManager(cfg_mgr, db_mgr, logger)
+
+    cfg_mgr.ensure_server("srv_alpha")
+    cfg_mgr.ensure_server("srv_beta")
+
+    # Select server 1
+    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+    chosen = select_current_server(cfg_mgr, logger, runtime=runtime)
+
+    assert chosen == "srv_alpha"
+    captured = capsys.readouterr().out
+    assert "srv_alpha" in captured
+    assert "srv_beta" in captured
+    assert "Directory:" in captured
+
+
+def test_startup_server_picker_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    from core.runtime import RuntimeManager
+    from db.manager import DatabaseManager
+    from ui.cli import startup_server_picker
+
+    config_file = tmp_path / "config.json"
+    logger = EnhancedLogger(tmp_path / "msm.log")
+    cfg_mgr = ConfigManager(config_file, logger)
+    db_mgr = DatabaseManager(tmp_path / "msm.db")
+    runtime = RuntimeManager(cfg_mgr, db_mgr, logger)
+
+    cfg_mgr.ensure_server("srv_pick_test")
+
+    monkeypatch.setattr("ui.cli.clear_screen", lambda: None)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+
+    selected = startup_server_picker(runtime, cfg_mgr, logger)
+    assert selected == "srv_pick_test"
+
+    captured = capsys.readouterr().out
+    assert "Select Server to Manage" in captured
+    assert "Directory:" in captured
