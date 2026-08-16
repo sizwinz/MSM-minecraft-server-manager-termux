@@ -57,7 +57,18 @@ def run_command(
         command = shlex.split(command)
     exec_env = os.environ.copy()
     if env:
-        exec_env.update(env)
+    php_lib_dirs: list[str] = []
+    for arg in command:
+        arg_path = Path(arg)
+        if arg_path.name in ("php", "php.exe"):
+            for cand_lib in (
+                arg_path.parent.parent / "lib",
+                arg_path.parent / "lib",
+                arg_path.parent.parent / "lib64",
+            ):
+                if cand_lib.is_dir():
+                    php_lib_dirs.append(str(cand_lib))
+
     if running_on_termux():
         termux_tmp = os.environ.get("TMPDIR") or "/data/data/com.termux/files/usr/tmp"
         try:
@@ -71,6 +82,14 @@ def run_command(
             for token in ("grun", "glibc-runner", "proot")
         ):
             exec_env.pop("LD_PRELOAD", None)
+            termux_glibc_lib = "/data/data/com.termux/files/usr/glibc/lib"
+            if Path(termux_glibc_lib).exists():
+                php_lib_dirs.append(termux_glibc_lib)
+
+    if php_lib_dirs:
+        curr_ld = exec_env.get("LD_LIBRARY_PATH", "")
+        new_ld = ":".join(php_lib_dirs + ([curr_ld] if curr_ld else []))
+        exec_env["LD_LIBRARY_PATH"] = new_ld
     try:
         if logger:
             logger.log(
@@ -191,6 +210,19 @@ def build_screen_launch_command(
 ) -> list[str]:
     shell = shutil.which("bash") or shutil.which("sh") or "sh"
     pre_cmds = [f"echo $$ > {shlex.quote(str(pid_file))}"]
+
+    php_lib_dirs: list[str] = []
+    for arg in startup_command:
+        arg_path = Path(arg)
+        if arg_path.name in ("php", "php.exe"):
+            for cand_lib in (
+                arg_path.parent.parent / "lib",
+                arg_path.parent / "lib",
+                arg_path.parent.parent / "lib64",
+            ):
+                if cand_lib.is_dir():
+                    php_lib_dirs.append(str(cand_lib))
+
     if (
         running_on_termux()
         and startup_command
@@ -200,8 +232,16 @@ def build_screen_launch_command(
         )
     ):
         pre_cmds.append("unset LD_PRELOAD")
+        termux_glibc_lib = "/data/data/com.termux/files/usr/glibc/lib"
+        if Path(termux_glibc_lib).exists():
+            php_lib_dirs.append(termux_glibc_lib)
+
+    if php_lib_dirs:
+        ld_val = ":".join(php_lib_dirs)
+        pre_cmds.append(f'export LD_LIBRARY_PATH="{ld_val}:${{LD_LIBRARY_PATH}}"')
+
     pre_script = "; ".join(pre_cmds)
-    shell_script = f"{pre_script}; " f"exec {shlex.join(startup_command)}"
+    shell_script = f"{pre_script}; exec {shlex.join(startup_command)}"
     return ["screen", "-dmS", screen_name, shell, "-c", shell_script]
 
 
