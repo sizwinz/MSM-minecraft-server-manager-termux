@@ -245,7 +245,7 @@ def configure_playit_api_tunnel(
     local_host = tunnel.get("local_host", "127.0.0.1")
     local_port = tunnel.get("local_port") or instance.get_server_port()
     try:
-        with PlayitApiClient(agent_secret=secret) as client:
+        with PlayitApiClient(agent_secret=secret, timeout=5) as client:
             agent_id = client.agent_rundata().get("agent_id")
             if not agent_id:
                 raise PlayitApiError("Playit did not return an agent id.")
@@ -258,14 +258,34 @@ def configure_playit_api_tunnel(
                 local_port=local_port,
                 existing_tunnel_id=tunnel.get("playit_tunnel_id"),
             )
-            try:
-                tunnel_id, endpoint = client.create_or_update_tunnel(**request)
-            except PlayitApiError:
-                session_key = load_playit_session()
-                if not session_key:
-                    raise
-                with PlayitApiClient(session_key=session_key) as account:
-                    tunnel_id, endpoint = account.create_or_update_tunnel(**request)
+            # A freshly claimed agent must register its real version through the
+            # running daemon before Playit will allow a mapping to be created.
+            for attempt in range(5):
+                try:
+                    tunnel_id, endpoint = client.create_or_update_tunnel(**request)
+                    break
+                except PlayitApiError as exc:
+                    if "AgentVersionTooOld" in str(exc):
+                        if attempt == 4:
+                            raise PlayitApiError(
+                                "AgentVersionTooOld after waiting for daemon registration. "
+                                "Check that the Playit daemon is connected in diagnostics. "
+                                "If connected, update Playit (Termux: pkg update && "
+                                "pkg upgrade playit), then retry setup and keep the "
+                                "existing agent; re-linking is not required."
+                            ) from exc
+                        if attempt == 0:
+                            logger.log(
+                                "INFO", "Waiting for Playit daemon registration..."
+                            )
+                        time.sleep(2)
+                        continue
+                    session_key = load_playit_session()
+                    if not session_key:
+                        raise
+                    with PlayitApiClient(session_key=session_key, timeout=5) as account:
+                        tunnel_id, endpoint = account.create_or_update_tunnel(**request)
+                    break
     except (PlayitApiError, ValueError) as exc:
         logger.log("ERROR", f"Playit mapping could not be configured: {exc}")
         return False
@@ -508,15 +528,8 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
             logger.log("ERROR", f"Playit linking failed: {exc}")
             pause()
             return
-    if not configure_playit_api_tunnel(
-        instance, config_manager, current_server, logger
-    ):
-        logger.log(
-            "WARNING",
-            "Agent linked, but mapping setup is incomplete. Check diagnostics or retry setup.",
-        )
-        pause()
-        return
+    # Start the daemon first so it can register its protocol version. The claim
+    # API only links credentials; it does not bring the agent online.
     save_tunnel_config(
         instance,
         config_manager,
@@ -525,7 +538,28 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
         binary_path=resolved,
         enabled=True,
         logger=logger,
+        protocol=(
+            "udp"
+            if config["servers"][current_server].get("server_flavor") == "pocketmine"
+            else tunnel.get("protocol", "tcp")
+        ),
     )
+    if instance.tunnel_process is None or instance.tunnel_process.poll() is not None:
+        logger.log(
+            "ERROR",
+            "Agent linked, but the Playit daemon did not stay running. "
+            "Check tunnel diagnostics, then retry setup using the existing agent.",
+        )
+        pause()
+        return
+    if not configure_playit_api_tunnel(
+        instance, config_manager, current_server, logger
+    ):
+        logger.log(
+            "WARNING",
+            "Agent credentials saved; mapping setup is incomplete. "
+            "Check diagnostics or retry setup using the existing agent.",
+        )
     pause()
 
 

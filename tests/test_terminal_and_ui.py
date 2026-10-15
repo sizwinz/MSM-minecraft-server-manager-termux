@@ -18,6 +18,7 @@ def test_playit_wizard_polls_without_blocking_for_terminal_input(
     from ui import cli
 
     instance = MagicMock()
+    instance.tunnel_process.poll.return_value = None
     instance.playit_secret_file = tmp_path / ".msm.playit.secret"
     instance.playit_endpoint_file = tmp_path / ".msm.playit.endpoint"
     runtime = MagicMock()
@@ -29,8 +30,13 @@ def test_playit_wizard_polls_without_blocking_for_terminal_input(
     client.wait_for_claim.return_value = "new-agent-secret"
     monkeypatch.setattr(cli, "PlayitApiClient", lambda **kwargs: client)
     monkeypatch.setattr(cli, "resolve_playit_binary", lambda _: "playitd")
-    monkeypatch.setattr(cli, "configure_playit_api_tunnel", lambda *args: True)
     save_config = MagicMock()
+
+    def configure_mapping(*args):
+        save_config.assert_called_once()
+        return True
+
+    monkeypatch.setattr(cli, "configure_playit_api_tunnel", configure_mapping)
     monkeypatch.setattr(cli, "save_tunnel_config", save_config)
     monkeypatch.setattr(cli, "pause", lambda: None)
 
@@ -46,6 +52,103 @@ def test_playit_wizard_polls_without_blocking_for_terminal_input(
     assert instance.playit_secret_file.read_text() == "new-agent-secret"
     assert "Keep MSM running" in capsys.readouterr().out
     save_config.assert_called_once()
+
+
+@pytest.mark.parametrize("daemon_running", [True, False])
+def test_playit_setup_retry_keeps_linked_credentials(
+    tmp_path, monkeypatch, daemon_running
+):
+    from unittest.mock import MagicMock
+    from ui import cli
+
+    instance = MagicMock()
+    instance.playit_secret_file = tmp_path / "secret"
+    instance.playit_secret_file.write_text("existing-secret")
+    instance.tunnel_process = MagicMock() if daemon_running else None
+    if daemon_running:
+        instance.tunnel_process.poll.return_value = None
+    runtime = MagicMock()
+    runtime.get_instance.return_value = instance
+    config = MagicMock()
+    config.load.return_value = {"servers": {"test": {"tunnel": {}}}}
+    client = MagicMock()
+    client.__enter__.return_value = client
+    monkeypatch.setattr(cli, "PlayitApiClient", lambda **kwargs: client)
+    monkeypatch.setattr(cli, "resolve_playit_binary", lambda _: "playitd")
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    monkeypatch.setattr(cli, "pause", lambda: None)
+    save_config = MagicMock()
+    mapping = MagicMock(return_value=False)
+    monkeypatch.setattr(cli, "save_tunnel_config", save_config)
+    monkeypatch.setattr(cli, "configure_playit_api_tunnel", mapping)
+
+    cli.playit_setup_wizard(runtime, config, "test", MagicMock())
+
+    save_config.assert_called_once()
+    assert mapping.call_count == int(daemon_running)
+    client.wait_for_claim.assert_not_called()
+    assert instance.playit_secret_file.read_text() == "existing-secret"
+
+
+@pytest.mark.parametrize("failure", ["registration_delay", "outdated", "other"])
+def test_playit_mapping_retries_only_version_registration(
+    tmp_path, monkeypatch, failure
+):
+    from unittest.mock import MagicMock
+    from ui import cli
+
+    instance = MagicMock()
+    instance.playit_secret_file = tmp_path / "secret"
+    instance.playit_secret_file.write_text("existing-secret")
+    instance.playit_endpoint_file = tmp_path / "endpoint"
+    instance.get_server_port.return_value = 25565
+    config = MagicMock()
+    saved = {"servers": {"test": {"tunnel": {}}}}
+    config.load.return_value = saved
+    config.mutate.side_effect = lambda update: update(saved)
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.agent_rundata.return_value = {"agent_id": "agent-id"}
+    version_error = cli.PlayitApiError("AgentVersionTooOld")
+    if failure == "registration_delay":
+        client.create_or_update_tunnel.side_effect = [
+            version_error,
+            version_error,
+            ("tunnel-id", "test.ply.gg:1234"),
+        ]
+    else:
+        client.create_or_update_tunnel.side_effect = (
+            version_error
+            if failure == "outdated"
+            else cli.PlayitApiError("OverPortLimit")
+        )
+    monkeypatch.setattr(cli, "PlayitApiClient", lambda **kwargs: client)
+    session = MagicMock(return_value=None)
+    monkeypatch.setattr(cli, "load_playit_session", session)
+    sleep = MagicMock()
+    monkeypatch.setattr(cli.time, "sleep", sleep)
+    logger = MagicMock()
+
+    result = cli.configure_playit_api_tunnel(instance, config, "test", logger)
+
+    assert result is (failure == "registration_delay")
+    assert (
+        client.create_or_update_tunnel.call_count
+        == {"registration_delay": 3, "outdated": 5, "other": 1}[failure]
+    )
+    assert (
+        sleep.call_count
+        == {"registration_delay": 2, "outdated": 4, "other": 0}[failure]
+    )
+    assert session.call_count == int(failure == "other")
+    if result:
+        assert saved["servers"]["test"]["tunnel"]["playit_tunnel_id"] == "tunnel-id"
+        assert instance.playit_endpoint_file.read_text() == "test.ply.gg:1234"
+    else:
+        config.mutate.assert_not_called()
+        if failure == "outdated":
+            assert "re-linking is not required" in logger.log.call_args.args[1]
+    assert instance.playit_secret_file.read_text() == "existing-secret"
 
 
 def test_cancelled_playit_relink_preserves_existing_credentials(tmp_path, monkeypatch):
