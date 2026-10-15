@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import os
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -413,7 +417,11 @@ def _determine_download(
             response = safe_request(session, "GET", version_info["url"], logger=logger)
             if not response:
                 raise RuntimeError("Failed to resolve vanilla download URL")
-            return response.json()["downloads"]["server"]["url"], target_filename
+            artifact = response.json()["downloads"]["server"]
+            for key in ("sha1", "size"):
+                if key in artifact:
+                    version_info.setdefault(key, artifact[key])
+            return artifact["url"], target_filename
         if flavor == "fabric":
             return (
                 "https://meta.fabricmc.net/v2/versions/loader/"
@@ -449,7 +457,10 @@ def download_server_binary(
         logger=logger,
     )
     target_path = Path(server_dir) / target_filename
+    if target_path.resolve().parent != Path(server_dir).resolve():
+        raise ValueError("Invalid download filename")
     session = create_robust_session()
+    temporary = None
     try:
         response = safe_request(
             session, "GET", download_url, logger=logger, stream=True
@@ -457,12 +468,39 @@ def download_server_binary(
         if not response:
             raise RuntimeError(f"Download failed for {download_url}")
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        with target_path.open("wb") as handle:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target_path.parent, suffix=".download"
+        )
+        temporary = Path(temporary_name)
+        sha256, sha1 = hashlib.sha256(), hashlib.sha1()
+        size = 0
+        with os.fdopen(descriptor, "wb") as handle:
             for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                 if chunk:
                     handle.write(chunk)
+                    size += len(chunk)
+                    sha256.update(chunk)
+                    sha1.update(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        expected_size = version_info.get("size") or getattr(
+            response, "headers", {}
+        ).get("Content-Length")
+        if not size or (expected_size and size != int(expected_size)):
+            raise RuntimeError("Downloaded artifact is incomplete")
+        for key, digest in (("sha256", sha256), ("sha1", sha1)):
+            if (
+                version_info.get(key)
+                and digest.hexdigest() != version_info[key].lower()
+            ):
+                raise RuntimeError(f"Downloaded artifact failed {key} verification")
+        if target_path.suffix == ".jar" and not zipfile.is_zipfile(temporary):
+            raise RuntimeError("Downloaded artifact is not a valid JAR")
+        temporary.replace(target_path)
         return target_path
     finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         session.close()
 
 
@@ -470,80 +508,103 @@ def get_ngrok_public_url(
     port: int,
     logger=None,
     timeout: int | float = NGROK_TIMEOUT,
+    api_url: str = "http://127.0.0.1:4040/api/tunnels",
+    local_host: str = "127.0.0.1",
 ) -> str | None:
-    session = create_robust_session()
-    try:
-        response = safe_request(
-            session,
-            "GET",
-            "http://127.0.0.1:4040/api/tunnels",
-            logger=logger,
-            timeout=timeout,
-        )
-        if not response:
+    """Read a matching TCP endpoint, with no fallback to an unrelated tunnel."""
+    from urllib.parse import urlsplit
+
+    # Agent inspection is local and time-sensitive: retry backoff must not block the UI.
+    with requests.Session() as session:
+        try:
+            response = session.get(api_url, timeout=timeout)
+            response.raise_for_status()
+            payload = response.json()
+            tunnels = payload.get("tunnels", [])
+            for tunnel in tunnels:
+                if tunnel.get("proto") != "tcp":
+                    continue
+                address = str(tunnel.get("config", {}).get("addr", ""))
+                target = urlsplit(address if "://" in address else f"tcp://{address}")
+                host = target.hostname
+                matches_host = host == local_host or {host, local_host} <= {
+                    "localhost",
+                    "127.0.0.1",
+                    "::1",
+                }
+                endpoint = tunnel.get("public_url")
+                if (
+                    target.port == int(port)
+                    and matches_host
+                    and isinstance(endpoint, str)
+                    and endpoint.startswith("tcp://")
+                ):
+                    return endpoint
+        except (requests.RequestException, ValueError, TypeError, AttributeError):
             return None
-        tunnels = response.json().get("tunnels", [])
-        if not tunnels:
-            return None
-        port_str = str(port)
-        for tunnel in tunnels:
-            address = str(tunnel.get("config", {}).get("addr", ""))
-            if port_str in address or address.endswith(f":{port}"):
-                return tunnel.get("public_url")
-        for tunnel in tunnels:
-            if tunnel.get("proto") == "tcp" and tunnel.get("public_url"):
-                return tunnel.get("public_url")
-        return tunnels[0].get("public_url")
-    finally:
-        session.close()
+    return None
 
 
 def download_ngrok_binary(logger=None) -> Path | None:
     import platform
-    import tarfile
+    from utils.archive import safe_extract_tar, safe_extract_zip
 
-    arch = platform.machine().lower()
-    if arch in ("aarch64", "arm64"):
-        ngrok_arch = "arm64"
-    elif arch in ("x86_64", "amd64"):
-        ngrok_arch = "amd64"
-    else:
+    architecture = {
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "armv7l": "arm",
+    }.get(platform.machine().lower())
+    system = {
+        "Windows": "windows",
+        "Darwin": "darwin",
+        "Linux": "linux",
+        "Android": "linux",
+    }.get(platform.system())
+    if not architecture or not system:
         if logger:
             logger.log(
-                "ERROR", f"Unsupported architecture for ngrok auto-download: {arch}"
+                "ERROR",
+                "ngrok automatic download is unavailable for this OS/architecture.",
             )
         return None
-
-    url = f"https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-{ngrok_arch}.tgz"
-
-    bin_dir = Path.home() / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    tar_path = bin_dir / "ngrok.tgz"
-
-    session = create_robust_session()
+    extension = "zip" if system == "windows" else "tgz"
+    url = (
+        "https://bin.equinox.io/c/bNyj1mQVY4c/"
+        f"ngrok-v3-stable-{system}-{architecture}.{extension}"
+    )
+    destination = Path.home() / "bin"
+    destination.mkdir(parents=True, exist_ok=True)
+    binary_name = "ngrok.exe" if system == "windows" else "ngrok"
     try:
-        response = safe_request(session, "GET", url, logger=logger, stream=True)
-        if not response:
-            return None
-        with tar_path.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
-                handle.write(chunk)
-
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=bin_dir)
-
-        ngrok_bin = bin_dir / "ngrok"
-        if ngrok_bin.exists():
-            ngrok_bin.chmod(0o755)
-
-        tar_path.unlink(missing_ok=True)
-        return ngrok_bin
-    except Exception as exc:
+        with tempfile.TemporaryDirectory(prefix=".ngrok-", dir=destination) as scratch:
+            stage = Path(scratch)
+            archive = stage / f"ngrok.{extension}"
+            with requests.Session() as session:
+                response = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
+                response.raise_for_status()
+                with archive.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                        handle.write(chunk)
+            extract = stage / "extracted"
+            extract.mkdir()
+            (safe_extract_zip if extension == "zip" else safe_extract_tar)(
+                archive, extract
+            )
+            binary = extract / binary_name
+            if not binary.is_file() or binary.is_symlink():
+                raise ValueError(
+                    "ngrok archive does not contain the expected executable"
+                )
+            binary.chmod(0o755)
+            target = destination / binary_name
+            binary.replace(target)
+            return target
+    except (OSError, ValueError, requests.RequestException, zipfile.BadZipFile) as exc:
         if logger:
-            logger.log("ERROR", f"Failed to download ngrok: {exc}")
+            logger.log("ERROR", f"ngrok download failed: {exc}")
         return None
-    finally:
-        session.close()
 
 
 def get_system_arch_and_os() -> tuple[str, str]:

@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import re
+import psutil
 import shutil
 import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
 
 from core.constants import (
     PLAYIT_ENDPOINT_FILE_NAME,
     PLAYIT_SECRET_FILE_NAME,
-    TUNNEL_PID_FILE_NAME,
     TUNNEL_STATUS_BINARY_MISSING,
     TUNNEL_STATUS_FAILED,
     TUNNEL_STATUS_MAPPING_MISSING,
@@ -23,18 +22,15 @@ from core.constants import (
     TUNNEL_STATUS_SECRET_MISSING,
 )
 from utils.system import (
-    is_pid_running,
-    read_pid_file,
     read_text_file,
-    remove_file,
-    running_on_termux,
     write_text_file,
 )
 from utils.tunnel_models import TunnelCheck, TunnelStatus
+from utils.tunnel_process import record_tunnel, tunnel_state, stop_tunnel_process
 from utils.tunnels import (
     build_playit_start_command,
     extract_playit_claim_url,
-    extract_playit_public_endpoint,
+    ANSI_ESCAPE_PATTERN,
 )
 
 # ---------------------------------------------------------------------------
@@ -111,6 +107,22 @@ def extract_playit_secret_from_file(path: Path) -> str | None:
     return None
 
 
+def save_playit_secret(path: Path, secret: str) -> None:
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=".playit-secret-")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(secret.strip())
+            handle.flush()
+            os.fsync(handle.fileno())
+        Path(name).replace(path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Log helpers
 # ---------------------------------------------------------------------------
@@ -122,7 +134,10 @@ def read_playit_log_tail(server_dir: Path, line_count: int = 80) -> str:
     if not log_path.exists():
         return ""
     try:
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        with log_path.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - 65536))
+            lines = handle.read().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return ""
     return "\n".join(lines[-line_count:])
@@ -133,123 +148,181 @@ def read_playit_log_tail(server_dir: Path, line_count: int = 80) -> str:
 # ---------------------------------------------------------------------------
 
 
-def inspect_playit_status(server_dir: Path) -> TunnelStatus:
-    """Derive a *TunnelStatus* from the PID file and log output."""
-    pid = read_pid_file(server_dir / TUNNEL_PID_FILE_NAME)
-    running = pid is not None and is_pid_running(pid)
-    log_tail = read_playit_log_tail(server_dir)
-    endpoint = extract_playit_public_endpoint(log_tail) if log_tail else None
-    claim_url = extract_playit_claim_url(log_tail) if log_tail else None
-
-    if not endpoint:
-        endpoint = get_saved_playit_endpoint(server_dir)
-
-    if not endpoint and running and (server_dir / ".msm.playit.secret").exists():
-        secret = read_text_file(server_dir / ".msm.playit.secret")
-        if secret:
-            try:
-                from utils.playit_api import (
-                    PlayitApiClient,
-                    extract_tunnel_endpoint,
-                )
-
-                client = PlayitApiClient(agent_secret=secret, timeout=4)
-                try:
-                    rundata = client.agent_rundata()
-                    if isinstance(rundata, dict):
-                        for t in rundata.get("tunnels") or []:
-                            ep = extract_tunnel_endpoint(t)
-                            if ep:
-                                endpoint = ep
-                                save_playit_endpoint(server_dir, endpoint)
-                                break
-                except Exception:
-                    pass
-
-                if not endpoint:
-                    try:
-                        v1_rundata = client.v1_agents_rundata()
-                        if isinstance(v1_rundata, dict):
-                            for t in v1_rundata.get("tunnels") or []:
-                                ep = extract_tunnel_endpoint(t)
-                                if ep:
-                                    endpoint = ep
-                                    save_playit_endpoint(server_dir, endpoint)
-                                    break
-                    except Exception:
-                        pass
-
-                if not endpoint:
-                    try:
-                        tunnels = client.tunnels_list()
-                        for t in tunnels:
-                            ep = extract_tunnel_endpoint(t)
-                            if ep:
-                                endpoint = ep
-                                save_playit_endpoint(server_dir, endpoint)
-                                break
-                    except Exception:
-                        pass
-
-                if not endpoint:
-                    try:
-                        v1_tunnels = client.v1_tunnels_list()
-                        for t in v1_tunnels:
-                            ep = extract_tunnel_endpoint(t)
-                            if ep:
-                                endpoint = ep
-                                save_playit_endpoint(server_dir, endpoint)
-                                break
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-    if endpoint and running:
-        save_playit_endpoint(server_dir, endpoint)
-        return TunnelStatus(
-            provider="playit",
-            state=TUNNEL_STATUS_READY,
-            message=f"Tunnel ready: {endpoint}",
-            endpoint=endpoint,
-            claim_url=claim_url,
-            pid=pid,
-        )
-    if endpoint:
-        return TunnelStatus(
-            provider="playit",
-            state=TUNNEL_STATUS_NOT_RUNNING,
-            message=f"Not running (last endpoint: {endpoint})",
-            endpoint=endpoint,
-        )
-    if claim_url and running:
-        return TunnelStatus(
-            provider="playit",
-            state=TUNNEL_STATUS_PROCESS_RUNNING,
-            message="Playit needs account linking",
-            claim_url=claim_url,
-            pid=pid,
-        )
-    if running:
-        return TunnelStatus(
-            provider="playit",
-            state=TUNNEL_STATUS_MAPPING_MISSING,
-            message=(
-                "Playit agent is running; "
-                "run the tunnel setup wizard to create or update the mapping"
-            ),
-            pid=pid,
-        )
-    return TunnelStatus(
-        provider="playit",
-        state=TUNNEL_STATUS_NOT_RUNNING,
-        message="Not running",
+def _matching_mapping(tunnel: dict, config: dict) -> bool:
+    origin = tunnel.get("origin") or {}
+    data = (
+        origin.get("data") or origin.get("details") or {}
+        if isinstance(origin, dict)
+        else {}
+    )
+    port = tunnel.get("local_port", data.get("local_port"))
+    host = tunnel.get("local_ip", data.get("local_ip"))
+    protocol = tunnel.get("proto") or tunnel.get("port_type")
+    target_id = config.get("playit_tunnel_id")
+    if target_id and str(tunnel.get("id")) != str(target_id):
+        return False
+    return (
+        not tunnel.get("disabled")
+        and tunnel.get("enabled", True)
+        and str(port) == str(config.get("local_port", 25565))
+        and host == config.get("local_host", "127.0.0.1")
+        and protocol in (config.get("protocol", "tcp"), "both")
     )
 
 
-# ---------------------------------------------------------------------------
-# Agent lifecycle
-# ---------------------------------------------------------------------------
+def playit_socket_path(server_dir: Path) -> Path:
+    import hashlib
+    import os
+    import tempfile
+
+    token = hashlib.sha256(str(server_dir.resolve()).encode()).hexdigest()[:16]
+    if os.name == "nt":
+        return Path("\\\\.\\pipe\\msm-playit-" + token)
+    # Unix-domain socket paths are limited to 108 bytes on Linux/Android.
+    return Path(tempfile.gettempdir()) / f"msm-playit-{token}.sock"
+
+
+def inspect_playit_status(
+    server_dir: Path, tunnel_config: dict | None = None
+) -> TunnelStatus:
+    state = tunnel_state(server_dir, "playit")
+    if not state:
+        saved = get_saved_playit_endpoint(server_dir)
+        return TunnelStatus(
+            "playit",
+            TUNNEL_STATUS_NOT_RUNNING,
+            f"Not running (last endpoint: {saved})" if saved else "Not running",
+            endpoint=saved,
+        )
+    config = {**state, **(tunnel_config or {})}
+    tail = ANSI_ESCAPE_PATTERN.sub("", read_playit_log_tail(server_dir))
+    claim_url = extract_playit_claim_url(tail)
+    error = None
+    connected = False
+    for line in tail.splitlines():
+        if any(
+            token in line.lower()
+            for token in (
+                "invalidagentkey",
+                "no longer valid",
+                "waiting for frontend secret",
+                "failed to load agent data",
+                "sessionnotsetup",
+                "session timed out",
+                "connection lost",
+                "disconnected",
+            )
+        ):
+            error, connected = line.strip(), False
+        elif any(
+            token in line.lower()
+            for token in (
+                "playit connected",
+                "tunnel running",
+                "agent registered",
+                "udp session details received",
+            )
+        ):
+            connected, error = True, None
+    if error:
+        fatal = any(
+            token in error.lower()
+            for token in (
+                "invalidagentkey",
+                "no longer valid",
+                "waiting for frontend secret",
+            )
+        )
+        return TunnelStatus(
+            "playit",
+            TUNNEL_STATUS_FAILED if fatal else TUNNEL_STATUS_PROCESS_RUNNING,
+            f"Playit: {error}",
+            pid=state["pid"],
+            claim_url=claim_url,
+        )
+    secret = extract_playit_secret_from_file(server_dir / PLAYIT_SECRET_FILE_NAME)
+    if not secret:
+        return TunnelStatus(
+            "playit",
+            TUNNEL_STATUS_SECRET_MISSING,
+            "Playit agent needs account linking",
+            pid=state["pid"],
+            claim_url=claim_url,
+        )
+    if connected:
+        from utils.playit_api import (
+            PlayitApiClient,
+            PlayitApiError,
+            extract_tunnel_endpoint,
+        )
+
+        try:
+            with PlayitApiClient(agent_secret=secret, timeout=2) as client:
+                data = client.agent_rundata()
+            mappings = [
+                t
+                for t in data.get("tunnels", [])
+                if isinstance(t, dict) and _matching_mapping(t, config)
+            ]
+            if len(mappings) == 1:
+                endpoint = extract_tunnel_endpoint(mappings[0])
+                if endpoint:
+                    save_playit_endpoint(server_dir, endpoint)
+                    return TunnelStatus(
+                        "playit",
+                        TUNNEL_STATUS_READY,
+                        f"Tunnel ready: {endpoint}",
+                        endpoint=endpoint,
+                        pid=state["pid"],
+                    )
+            target_id = config.get("playit_tunnel_id")
+            if target_id and any(
+                str(t.get("id")) == str(target_id)
+                for t in data.get("pending", [])
+                if isinstance(t, dict)
+            ):
+                with PlayitApiClient(agent_secret=secret, timeout=2) as client:
+                    pending = client.tunnels_list(agent_id=data.get("agent_id"))
+                for item in pending:
+                    if str(item.get("id")) == str(target_id):
+                        allocation = item.get("alloc") or {}
+                        reason = item.get("disabled_reason") or (
+                            allocation.get("data") or {}
+                        ).get("reason")
+                        if reason:
+                            return TunnelStatus(
+                                "playit",
+                                TUNNEL_STATUS_FAILED,
+                                f"Playit disabled this mapping: {reason}. "
+                                "Check available ports in your Playit dashboard.",
+                                pid=state["pid"],
+                            )
+                return TunnelStatus(
+                    "playit",
+                    TUNNEL_STATUS_PROCESS_RUNNING,
+                    "Playit mapping is waiting for provider allocation",
+                    pid=state["pid"],
+                )
+            return TunnelStatus(
+                "playit",
+                TUNNEL_STATUS_MAPPING_MISSING,
+                "No unique active Playit mapping matches this server's address and protocol.",
+                pid=state["pid"],
+            )
+        except PlayitApiError as exc:
+            return TunnelStatus(
+                "playit",
+                TUNNEL_STATUS_FAILED,
+                f"Cannot verify Playit mapping: {exc}",
+                pid=state["pid"],
+            )
+    return TunnelStatus(
+        "playit",
+        TUNNEL_STATUS_PROCESS_RUNNING,
+        "Playit is connecting; public endpoint is not confirmed",
+        claim_url=claim_url,
+        pid=state["pid"],
+    )
 
 
 def start_playit_agent(
@@ -257,81 +330,108 @@ def start_playit_agent(
     binary_path: str,
     secret_file: Path,
     logger,
-) -> tuple[TunnelStatus, Any]:
-    """Start the playit background agent and return an initial status."""
+    tunnel_config: dict | None = None,
+):
     resolved = resolve_playit_binary(binary_path)
     if not resolved:
-        if running_on_termux():
-            install_hint = "Install with: pkg install tur-repo && pkg install playit"
-        else:
-            install_hint = (
-                "Download playit from https://playit.gg/download "
-                "or install via your distro's package manager."
+        return (
+            TunnelStatus(
+                "playit",
+                TUNNEL_STATUS_BINARY_MISSING,
+                f"Playit daemon '{binary_path}' not found. "
+                "Install playitd or a standalone Playit agent.",
+            ),
+            None,
+        )
+    if not extract_playit_secret_from_file(secret_file):
+        return (
+            TunnelStatus(
+                "playit",
+                TUNNEL_STATUS_SECRET_MISSING,
+                "Playit secret is missing; run the setup wizard.",
+            ),
+            None,
+        )
+    if tunnel_state(server_dir, "playit"):
+        return inspect_playit_status(server_dir, tunnel_config), None
+    if tunnel_state(server_dir):
+        return (
+            TunnelStatus(
+                "playit",
+                TUNNEL_STATUS_FAILED,
+                "Stop the existing tunnel before changing providers.",
+            ),
+            None,
+        )
+    server_dir.mkdir(parents=True, exist_ok=True)
+    process = None
+    try:
+        help_result = subprocess.run(
+            [resolved, "--help"], capture_output=True, text=True, timeout=5, check=False
+        )
+        help_text = help_result.stdout + help_result.stderr
+        if "--secret-path" not in help_text and "--secret_path" not in help_text:
+            raise ValueError(
+                "This executable is a controller, not a Playit daemon. Install/select playitd."
             )
+        socket_file = playit_socket_path(server_dir)
+        command = build_playit_start_command(
+            resolved,
+            secret_path=secret_file,
+            socket_path=socket_file if "--socket-path" in help_text else None,
+            legacy="--secret_path" in help_text,
+        )
+        with (server_dir / ".msm.playit.log").open("w", encoding="utf-8") as handle:
+            process = subprocess.Popen(
+                command,
+                cwd=server_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        config = dict(tunnel_config or {})
+        record_tunnel(
+            server_dir,
+            "playit",
+            process,
+            **{
+                k: config.get(k, v)
+                for k, v in (
+                    ("local_host", "127.0.0.1"),
+                    ("local_port", 25565),
+                    ("protocol", "tcp"),
+                    ("playit_tunnel_id", None),
+                )
+            },
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                status = TunnelStatus(
+                    "playit",
+                    TUNNEL_STATUS_FAILED,
+                    f"Playit exited (code {process.returncode}): "
+                    f"{read_playit_log_tail(server_dir, 8)}",
+                )
+                stop_tunnel_process(server_dir, process)
+                return status, None
+            status = inspect_playit_status(server_dir, config)
+            if status.state == TUNNEL_STATUS_FAILED:
+                stop_tunnel_process(server_dir, process)
+                return status, None
+            if status.state in (TUNNEL_STATUS_READY, TUNNEL_STATUS_MAPPING_MISSING):
+                return status, process
+            time.sleep(0.2)
+        return inspect_playit_status(server_dir, config), process
+    except (OSError, ValueError, psutil.Error, subprocess.TimeoutExpired) as exc:
+        stop_tunnel_process(server_dir, process)
         return (
             TunnelStatus(
-                provider="playit",
-                state=TUNNEL_STATUS_BINARY_MISSING,
-                message=(
-                    f"Playit binary '{binary_path}' was not found. " + install_hint
-                ),
+                "playit", TUNNEL_STATUS_FAILED, f"Could not start Playit: {exc}"
             ),
             None,
         )
-    if not secret_file.exists():
-        return (
-            TunnelStatus(
-                provider="playit",
-                state=TUNNEL_STATUS_SECRET_MISSING,
-                message=(
-                    "Playit secret file was not found. "
-                    "Run the tunnel setup wizard first."
-                ),
-            ),
-            None,
-        )
-    existing_pid = read_pid_file(server_dir / TUNNEL_PID_FILE_NAME)
-    if existing_pid and is_pid_running(existing_pid):
-        return inspect_playit_status(server_dir), None
-
-    log_path = server_dir / ".msm.playit.log"
-    log_handle = log_path.open("a", encoding="utf-8")
-    socket_file = server_dir / ".msm.playit.sock"
-    command = build_playit_start_command(
-        resolved, secret_path=secret_file, socket_path=socket_file
-    )
-    process = subprocess.Popen(
-        command,
-        cwd=server_dir,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    write_text_file(server_dir / TUNNEL_PID_FILE_NAME, str(process.pid))
-
-    deadline = time.monotonic() + 3.0
-    exit_code = process.poll()
-    while exit_code is None and time.monotonic() < deadline:
-        time.sleep(0.1)
-        exit_code = process.poll()
-
-    if exit_code is not None:
-        remove_file(server_dir / TUNNEL_PID_FILE_NAME)
-        log_handle.flush()
-        log_handle.close()
-        tail = read_playit_log_tail(server_dir, line_count=10)
-        return (
-            TunnelStatus(
-                provider="playit",
-                state=TUNNEL_STATUS_FAILED,
-                message=f"Playit exited immediately (code {exit_code}). {tail}",
-            ),
-            None,
-        )
-
-    log_handle.flush()
-    status = inspect_playit_status(server_dir)
-    return status, log_handle
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +531,9 @@ def diagnose_playit(
             )
         )
 
-    status = inspect_playit_status(server_dir)
+    status = inspect_playit_status(
+        server_dir, {**tunnel_config, "local_port": local_port}
+    )
     checks.append(
         TunnelCheck(
             name="Playit status",

@@ -1,18 +1,21 @@
-"""Ngrok agent lifecycle, status inspection, and diagnostics."""
+"""Isolated ngrok agents with verified process ownership and current status."""
 
+from __future__ import annotations
+
+import json
 import os
 import re
 import shutil
 import socket
 import subprocess
 import time
+
+import psutil
 from pathlib import Path
-from typing import Any
 
 from core.constants import (
     NGROK_ENDPOINT_FILE_NAME,
     NGROK_TIMEOUT,
-    TUNNEL_PID_FILE_NAME,
     TUNNEL_STATUS_BINARY_MISSING,
     TUNNEL_STATUS_FAILED,
     TUNNEL_STATUS_NOT_RUNNING,
@@ -20,192 +23,170 @@ from core.constants import (
     TUNNEL_STATUS_READY,
 )
 from utils.network import get_ngrok_public_url
-from utils.system import (
-    is_pid_running,
-    read_pid_file,
-    read_text_file,
-    remove_file,
-    write_text_file,
-)
+from utils.system import read_text_file, write_text_file
 from utils.tunnel_models import TunnelCheck, TunnelStatus
-
-# ---------------------------------------------------------------------------
-# Binary resolution
-# ---------------------------------------------------------------------------
+from utils.tunnel_process import record_tunnel, tunnel_state, stop_tunnel_process
 
 
 def resolve_ngrok_binary(binary_path: str | None = None) -> str | None:
-    """Return the first usable ngrok binary, or *None*."""
-    candidates: list[str] = []
-    if binary_path:
-        candidates.append(binary_path)
+    candidates = [binary_path] if binary_path else []
     candidates.extend(["ngrok", "termux-ngrok"])
     for candidate in candidates:
         resolved = shutil.which(candidate)
         if resolved:
             return resolved
         expanded = Path(candidate).expanduser()
-        if expanded.exists() and expanded.is_file():
-            return str(expanded)
-        home_candidate = Path.home() / "bin" / candidate
-        if home_candidate.exists() and home_candidate.is_file():
-            return str(home_candidate)
-        prefix_bin = (
+        for path in (
+            expanded,
+            Path.home() / "bin" / candidate,
             Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
             / "bin"
-            / candidate
-        )
-        if prefix_bin.exists() and prefix_bin.is_file():
-            return str(prefix_bin)
-        termux_ngrok_dir = Path.home() / "termux-ngrok" / candidate
-        if termux_ngrok_dir.exists() and termux_ngrok_dir.is_file():
-            return str(termux_ngrok_dir)
+            / candidate,
+            Path.home() / "termux-ngrok" / candidate,
+        ):
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
     return None
 
 
-# ---------------------------------------------------------------------------
-# Persistent endpoint cache
-# ---------------------------------------------------------------------------
-
-
 def get_saved_ngrok_endpoint(server_dir: Path) -> str | None:
-    """Read a previously saved ngrok public endpoint."""
     return read_text_file(server_dir / NGROK_ENDPOINT_FILE_NAME)
 
 
 def save_ngrok_endpoint(server_dir: Path, endpoint: str) -> None:
-    """Persist the current ngrok public endpoint."""
     write_text_file(server_dir / NGROK_ENDPOINT_FILE_NAME, endpoint)
 
 
-# ---------------------------------------------------------------------------
-# Log helpers
-# ---------------------------------------------------------------------------
+def _read_ngrok_log_tail(server_dir: Path, line_count: int = 30) -> str:
+    try:
+        with (server_dir / ".msm.ngrok.log").open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - 32768))
+            return "\n".join(
+                handle.read()
+                .decode("utf-8", errors="replace")
+                .splitlines()[-line_count:]
+            )
+    except OSError:
+        return ""
 
 
 def _extract_endpoint_or_error_from_log(
     server_dir: Path,
 ) -> tuple[str | None, str | None]:
-    """Extract public URL or error message directly from ngrok log output."""
-    log_path = server_dir / ".msm.ngrok.log"
-    if not log_path.exists():
-        return None, None
-    try:
-        content = log_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None, None
-
-    # 1. Check for public TCP endpoint: url=tcp://0.tcp.ngrok.io:12345
-    match = re.search(r'url=[\'"]?(tcp://[^\s\'"]+)', content)
-    if match:
-        return match.group(1), None
-
-    # 2. Check for explicit error messages: lvl=eror ...
-    err_match = re.search(
-        r'lvl=(?:eror|crit)\s+msg="([^"]+)"(?:\s+err="([^"]+)")?', content
-    )
-    if err_match:
-        msg = err_match.group(1)
-        detail = err_match.group(2)
-        return None, f"{msg} ({detail})" if detail else msg
-
-    # 3. Check for ERR_NGROK_ codes
-    err_code = re.search(r"(ERR_NGROK_[0-9]+[^\n\r\"]*)", content)
-    if err_code:
-        return None, err_code.group(1)
-
-    return None, None
-
-
-def _read_ngrok_log_tail(server_dir: Path, line_count: int = 10) -> str:
-    """Return the last *line_count* lines of the ngrok log."""
-    log_path = server_dir / ".msm.ngrok.log"
-    if not log_path.exists():
-        return ""
-    try:
-        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(lines[-line_count:])
+    endpoint = None
+    error = None
+    for line in _read_ngrok_log_tail(server_dir, 150).splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = {}
+        if isinstance(entry, dict) and entry:
+            message = str(entry.get("msg", ""))
+            if "no usable hardware address" in message.lower():
+                continue
+            if (
+                entry.get("lvl") in ("eror", "error", "crit", "fatal")
+                or "ERR_NGROK_" in line
+            ):
+                error = str(entry.get("err") or message)
+                endpoint = None
+            elif "reconnect" in message.lower() or "session closed" in message.lower():
+                endpoint = None
+                error = message
+            elif message in ("client session established", "tunnel session started"):
+                error = None
+            elif str(entry.get("url", "")).startswith("tcp://"):
+                endpoint = entry["url"]
+                error = None
+        else:
+            code = re.search(r"ERR_NGROK_[0-9]+[^\n]*", line)
+            if code:
+                error, endpoint = code.group(0), None
+            elif re.search(r"lvl=(eror|error|crit)", line):
+                error, endpoint = line, None
+            else:
+                match = re.search(r"tcp://[a-zA-Z0-9.-]+:[0-9]+", line)
+                if match:
+                    endpoint, error = match.group(0), None
+    return endpoint, error
 
 
-# ---------------------------------------------------------------------------
-# Status inspection
-# ---------------------------------------------------------------------------
-
-
-def inspect_ngrok_status(
-    server_dir: Path,
-    port: int,
-    logger=None,
-) -> TunnelStatus:
-    """Derive a *TunnelStatus* from the PID file, the ngrok API, and log output."""
-    pid = read_pid_file(server_dir / TUNNEL_PID_FILE_NAME)
-    running = pid is not None and is_pid_running(pid)
-
-    if running:
-        endpoint = get_ngrok_public_url(port, logger=logger, timeout=2)
-        if not endpoint:
-            log_url, log_err = _extract_endpoint_or_error_from_log(server_dir)
-            if log_url:
-                endpoint = log_url
-            elif log_err:
-                return TunnelStatus(
-                    provider="ngrok",
-                    state=TUNNEL_STATUS_FAILED,
-                    message=f"Ngrok error: {log_err}",
-                    pid=pid,
-                )
-        if endpoint:
-            save_ngrok_endpoint(server_dir, endpoint)
-            return TunnelStatus(
-                provider="ngrok",
-                state=TUNNEL_STATUS_READY,
-                message=f"Tunnel ready: {endpoint}",
-                endpoint=endpoint,
-                pid=pid,
-            )
+def inspect_ngrok_status(server_dir: Path, port: int, logger=None) -> TunnelStatus:
+    state = tunnel_state(server_dir, "ngrok")
+    if not state:
         saved = get_saved_ngrok_endpoint(server_dir)
-        if saved:
-            return TunnelStatus(
-                provider="ngrok",
-                state=TUNNEL_STATUS_READY,
-                message=f"Tunnel ready: {saved}",
-                endpoint=saved,
-                pid=pid,
-            )
-        tail = _read_ngrok_log_tail(server_dir, line_count=2)
-        msg = "Ngrok is running; waiting for public URL"
-        if "ERR_NGROK_" in tail or "error" in tail.lower():
-            clean_tail = " ".join(tail.split())
-            if len(clean_tail) > 60:
-                clean_tail = clean_tail[:60] + "..."
-            msg = f"Ngrok: {clean_tail}"
         return TunnelStatus(
-            provider="ngrok",
-            state=TUNNEL_STATUS_PROCESS_RUNNING,
-            message=msg,
-            pid=pid,
-        )
-
-    saved = get_saved_ngrok_endpoint(server_dir)
-    if saved:
-        return TunnelStatus(
-            provider="ngrok",
-            state=TUNNEL_STATUS_NOT_RUNNING,
-            message=f"Not running (last endpoint: {saved})",
+            "ngrok",
+            TUNNEL_STATUS_NOT_RUNNING,
+            f"Not running (last endpoint: {saved})" if saved else "Not running",
             endpoint=saved,
         )
+    _, error = _extract_endpoint_or_error_from_log(server_dir)
+    if error:
+        return TunnelStatus(
+            "ngrok", TUNNEL_STATUS_FAILED, f"Ngrok: {error}", pid=state["pid"]
+        )
+    # Only query the inspection API belonging to this launch. Never use another
+    # server's API or promote a historical cached URL to live readiness.
+    endpoint = get_ngrok_public_url(
+        port,
+        timeout=1,
+        api_url=state["api_url"],
+        local_host=state.get("local_host", "127.0.0.1"),
+    )
+    if endpoint:
+        save_ngrok_endpoint(server_dir, endpoint)
+        return TunnelStatus(
+            "ngrok",
+            TUNNEL_STATUS_READY,
+            f"Tunnel ready: {endpoint}",
+            endpoint=endpoint,
+            pid=state["pid"],
+        )
     return TunnelStatus(
-        provider="ngrok",
-        state=TUNNEL_STATUS_NOT_RUNNING,
-        message="Not running",
+        "ngrok",
+        TUNNEL_STATUS_PROCESS_RUNNING,
+        "Ngrok is running; waiting for a current public TCP endpoint",
+        pid=state["pid"],
     )
 
 
-# ---------------------------------------------------------------------------
-# Agent lifecycle
-# ---------------------------------------------------------------------------
+def _ngrok_config(server_dir: Path, config_path: str | None) -> tuple[list[str], str]:
+    candidates = (
+        [Path(config_path).expanduser()]
+        if config_path
+        else [
+            Path.home() / ".config/ngrok/ngrok.yml",
+            Path.home() / ".ngrok2/ngrok.yml",
+            Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
+            / "ngrok/ngrok.yml",
+            Path.home() / "Library/Application Support/ngrok/ngrok.yml",
+        ]
+    )
+    base = next((p for p in candidates if p.is_file()), None)
+    if config_path and base is None:
+        raise ValueError("Configured ngrok configuration file does not exist")
+    version = "3"
+    if base:
+        match = re.search(
+            r"^version:\s*[\"\']?([23])", base.read_text(encoding="utf-8"), re.MULTILINE
+        )
+        if not match:
+            raise ValueError("ngrok configuration must specify version 2 or 3")
+        version = match.group(1)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    address = f"127.0.0.1:{port}"
+    overlay = server_dir / ".msm.ngrok.yml"
+    indent = "  " if version == "3" else ""
+    text = f'version: "{version}"\n' + ("agent:\n" if version == "3" else "")
+    text += f'{indent}web_addr: "{address}"\n'
+    overlay.write_text(text, encoding="utf-8")
+    args = ["--config", str(base)] if base else []
+    args.extend(["--config", str(overlay)])
+    return args, f"http://{address}/api/tunnels"
 
 
 def start_ngrok_agent(
@@ -213,113 +194,105 @@ def start_ngrok_agent(
     binary_path: str,
     port: int,
     logger,
-) -> tuple[TunnelStatus, Any]:
-    """Start the ngrok background agent and return an initial status."""
+    local_host: str = "127.0.0.1",
+    config_path: str | None = None,
+):
     resolved = resolve_ngrok_binary(binary_path)
     if not resolved:
         return (
             TunnelStatus(
-                provider="ngrok",
-                state=TUNNEL_STATUS_BINARY_MISSING,
-                message=f"Ngrok binary '{binary_path}' was not found.",
+                "ngrok",
+                TUNNEL_STATUS_BINARY_MISSING,
+                f"Ngrok binary '{binary_path}' was not found.",
             ),
             None,
         )
-    existing_pid = read_pid_file(server_dir / TUNNEL_PID_FILE_NAME)
-    if existing_pid and is_pid_running(existing_pid):
-        return inspect_ngrok_status(server_dir, port, logger=logger), None
-
-    log_path = server_dir / ".msm.ngrok.log"
-    log_handle = log_path.open("a", encoding="utf-8")
-    target_addr = f"127.0.0.1:{port}"
-    chroot_bin = shutil.which("termux-chroot")
-    if chroot_bin:
-        command = [chroot_bin, resolved, "tcp", target_addr, "--log", "stdout"]
-    else:
-        command = [resolved, "tcp", target_addr, "--log", "stdout"]
-    process = subprocess.Popen(
-        command,
-        cwd=server_dir,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    write_text_file(server_dir / TUNNEL_PID_FILE_NAME, str(process.pid))
-
-    deadline = time.monotonic() + 3.0
-    exit_code = process.poll()
-    while exit_code is None and time.monotonic() < deadline:
-        time.sleep(0.1)
-        exit_code = process.poll()
-
-    if exit_code is not None:
-        remove_file(server_dir / TUNNEL_PID_FILE_NAME)
-        log_handle.flush()
-        log_handle.close()
-        tail = _read_ngrok_log_tail(server_dir)
+    if tunnel_state(server_dir, "ngrok"):
+        return inspect_ngrok_status(server_dir, port, logger), None
+    if tunnel_state(server_dir):
         return (
             TunnelStatus(
-                provider="ngrok",
-                state=TUNNEL_STATUS_FAILED,
-                message=f"Ngrok exited immediately (code {exit_code}). {tail}",
+                "ngrok",
+                TUNNEL_STATUS_FAILED,
+                "Stop the existing tunnel before changing providers.",
             ),
             None,
         )
-
-    log_handle.flush()
-
-    # Poll the ngrok API and log output for the public URL.
-    poll_timeout = min(NGROK_TIMEOUT, 15)
-    poll_deadline = time.monotonic() + poll_timeout
-    public_url: str | None = None
-    while time.monotonic() < poll_deadline:
-        public_url = get_ngrok_public_url(port, logger=logger, timeout=2)
-        if not public_url:
-            log_url, log_err = _extract_endpoint_or_error_from_log(server_dir)
-            if log_url:
-                public_url = log_url
-            elif log_err:
+    if (
+        not 1 <= int(port) <= 65535
+        or not local_host
+        or any(c.isspace() for c in local_host)
+    ):
+        return (
+            TunnelStatus(
+                "ngrok", TUNNEL_STATUS_FAILED, "Invalid local tunnel address."
+            ),
+            None,
+        )
+    server_dir.mkdir(parents=True, exist_ok=True)
+    process = None
+    try:
+        config_args, api_url = _ngrok_config(server_dir, config_path)
+        host = f"[{local_host}]" if ":" in local_host else local_host
+        command = [
+            resolved,
+            "tcp",
+            f"{host}:{port}",
+            "--log",
+            "stdout",
+            "--log-format",
+            "json",
+            *config_args,
+        ]
+        # Installed Termux wrappers already arrange their own runtime. Avoid nesting chroots.
+        with (server_dir / ".msm.ngrok.log").open("w", encoding="utf-8") as handle:
+            process = subprocess.Popen(
+                command,
+                cwd=server_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        record_tunnel(
+            server_dir,
+            "ngrok",
+            process,
+            api_url=api_url,
+            local_host=local_host,
+            local_port=port,
+        )
+        deadline = time.monotonic() + min(NGROK_TIMEOUT, 15)
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                _, error = _extract_endpoint_or_error_from_log(server_dir)
+                stop_tunnel_process(server_dir, process)
                 return (
                     TunnelStatus(
-                        provider="ngrok",
-                        state=TUNNEL_STATUS_FAILED,
-                        message=f"Ngrok: {log_err}",
-                        pid=process.pid,
+                        "ngrok",
+                        TUNNEL_STATUS_FAILED,
+                        error
+                        or _read_ngrok_log_tail(server_dir)
+                        or f"Ngrok exited (code {process.returncode})",
                     ),
-                    log_handle,
+                    None,
                 )
-        if public_url:
-            break
-        time.sleep(1)
-
-    if public_url:
-        save_ngrok_endpoint(server_dir, public_url)
+            status = inspect_ngrok_status(server_dir, port, logger)
+            if status.state == TUNNEL_STATUS_FAILED:
+                stop_tunnel_process(server_dir, process)
+                return status, None
+            if status.state == TUNNEL_STATUS_READY:
+                return status, process
+            time.sleep(0.2)
+        return inspect_ngrok_status(server_dir, port, logger), process
+    except (OSError, ValueError, psutil.Error) as exc:
+        stop_tunnel_process(server_dir, process)
         return (
             TunnelStatus(
-                provider="ngrok",
-                state=TUNNEL_STATUS_READY,
-                message=f"Tunnel ready: {public_url}",
-                endpoint=public_url,
-                pid=process.pid,
+                "ngrok", TUNNEL_STATUS_FAILED, f"Could not start ngrok: {exc}"
             ),
-            log_handle,
+            None,
         )
-    return (
-        TunnelStatus(
-            provider="ngrok",
-            state=TUNNEL_STATUS_PROCESS_RUNNING,
-            message=(
-                "Ngrok process started. " "Check http://127.0.0.1:4040 for status."
-            ),
-            pid=process.pid,
-        ),
-        log_handle,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Diagnostics
-# ---------------------------------------------------------------------------
 
 
 def diagnose_ngrok(

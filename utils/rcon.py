@@ -35,7 +35,11 @@ class RCONClient:
             (self.host, self.port), timeout=self.timeout
         )
         self.socket.settimeout(self.timeout)
-        self.authenticate()
+        try:
+            self.authenticate()
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         if self.socket:
@@ -76,6 +80,8 @@ class RCONClient:
             raise RCONError("RCON socket is not connected")
         size_data = self._recv_exact(4)
         size = struct.unpack("<i", size_data)[0]
+        if not 10 <= size <= 4 * 1024 * 1024:
+            raise RCONError("Invalid RCON packet size")
         packet = self._recv_exact(size)
         request_id, packet_type = struct.unpack("<ii", packet[:8])
         payload = packet[8:-2].decode("utf-8", errors="replace")

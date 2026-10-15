@@ -40,9 +40,10 @@ from process.manager import ProcessManager
 from utils.archive import (
     create_backup_archive,
     discover_world_directories,
-    safe_extract_zip,
+    restore_world_backup,
 )
 from utils.ngrok import inspect_ngrok_status, start_ngrok_agent
+from utils.tunnel_process import stop_tunnel_process
 from utils.playit import (
     build_playit_mapping_hint,
     inspect_playit_status,
@@ -56,8 +57,6 @@ from utils.system import (
     get_local_ipv4_addresses,
     get_screen_name,
     get_server_dir,
-    is_pid_running,
-    read_pid_file,
     read_text_file,
     remove_file,
     write_text_file,
@@ -87,6 +86,14 @@ class ServerInstance:
 
     @property
     def server_dir(self) -> Path:
+        configured = (
+            self.config_manager.load()
+            .get("servers", {})
+            .get(self.server_name, {})
+            .get("server_dir")
+        )
+        if configured:
+            return Path(configured).expanduser()
         return get_server_dir(self.server_name)
 
     @property
@@ -186,8 +193,16 @@ class ServerInstance:
                         "run the tunnel setup wizard"
                     )
                 else:
-                    status = inspect_playit_status(self.server_dir)
-                    tunnel_url = status.endpoint
+                    status = inspect_playit_status(
+                        self.server_dir,
+                        {
+                            **tunnel_config,
+                            "local_port": tunnel_config.get("local_port") or port,
+                        },
+                    )
+                    tunnel_url = (
+                        status.endpoint if status.state == TUNNEL_STATUS_READY else None
+                    )
                     tunnel_setup_url = status.claim_url
                     if tunnel_url:
                         tunnel_status = tunnel_url
@@ -203,8 +218,14 @@ class ServerInstance:
                     else:
                         tunnel_status = status.message
             elif tunnel_provider == "ngrok":
-                status = inspect_ngrok_status(self.server_dir, port, logger=self.logger)
-                tunnel_url = status.endpoint
+                status = inspect_ngrok_status(
+                    self.server_dir,
+                    int(tunnel_config.get("local_port") or port),
+                    logger=self.logger,
+                )
+                tunnel_url = (
+                    status.endpoint if status.state == TUNNEL_STATUS_READY else None
+                )
                 tunnel_status = tunnel_url or status.message
             else:
                 tunnel_status = f"{tunnel_provider} is not supported yet"
@@ -296,6 +317,7 @@ class ServerInstance:
                 for key, value in server_config.get("server_settings", {}).items()
             }
         )
+        properties.pop("port", None)
 
         port = int(
             server_config.get("server_settings", {}).get(
@@ -307,6 +329,8 @@ class ServerInstance:
             properties["server-port"] = str(port)
             properties["server-portv4"] = str(port)
             properties["server-portv6"] = str(port + 1)
+        else:
+            properties["server-port"] = str(port)
 
         rcon_config = server_config.get("rcon", {})
         if rcon_config.get("enabled"):
@@ -374,15 +398,57 @@ class ServerInstance:
         self.config_manager.mutate(updater)
 
     def create_backup(self, backup_type: str = "manual") -> Path:
+        with self._lock:
+            return self._create_backup(backup_type)
+
+    def _create_backup(self, backup_type: str) -> Path:
         self.ensure_server_files()
         world_dirs = discover_world_directories(self.server_dir)
         if not world_dirs:
             raise RuntimeError("No world directories were found to back up.")
         if not check_disk_space(self.server_dir, required_mb=500, logger=self.logger):
             raise RuntimeError("Insufficient disk space for backup.")
-        backup_name = f"world_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        backup_name = f"world_backup_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.zip"
         backup_path = self.backup_dir / backup_name
-        size = create_backup_archive(self.server_dir, backup_path, world_dirs)
+        paused = False
+        try:
+            if self.is_running():
+                _, server_config = self.refresh_config()
+                if server_config.get("server_flavor") == "pocketmine":
+                    raise RuntimeError("Stop PocketMine before backing up its worlds.")
+                rcon = server_config.get("rcon", {})
+                if not rcon.get("enabled") or not rcon.get("password"):
+                    raise RuntimeError(
+                        "Live backups require RCON; enable it or stop the server."
+                    )
+                with RCONClient(
+                    rcon.get("host", "127.0.0.1"),
+                    int(rcon.get("port", 25575)),
+                    rcon["password"],
+                    timeout=30,
+                ) as client:
+                    paused = True
+                    response = client.command("save-off")
+                    if (
+                        "disabled" not in response.lower()
+                        and "already" not in response.lower()
+                    ):
+                        raise RuntimeError(
+                            "Server did not confirm save-off; backup cancelled."
+                        )
+                    response = client.command("save-all flush")
+                    if "saved" not in response.lower():
+                        raise RuntimeError(
+                            "Server did not confirm a flushed save; backup cancelled."
+                        )
+            size = create_backup_archive(self.server_dir, backup_path, world_dirs)
+        finally:
+            if paused:
+                if not self.send_command("save-on"):
+                    self.logger.log(
+                        "ERROR",
+                        "Could not resume world saving. Run 'save-on' on the server immediately.",
+                    )
         self.db_manager.log_backup(
             self.server_name,
             str(backup_path),
@@ -397,12 +463,20 @@ class ServerInstance:
         return backup_path
 
     def restore_backup(self, backup_name: str) -> Path:
+        with self._lock:
+            return self._restore_backup(backup_name)
+
+    def _restore_backup(self, backup_name: str) -> Path:
         if self.is_running():
             raise RuntimeError("Stop the server before restoring a backup.")
         backup_path = self.backup_dir / backup_name
+        if backup_path.resolve().parent != self.backup_dir.resolve():
+            raise ValueError(
+                "Backup must be a file inside this server's backup directory."
+            )
         if not backup_path.exists():
             raise RuntimeError(f"Backup '{backup_name}' does not exist.")
-        safe_extract_zip(backup_path, self.server_dir)
+        restore_world_backup(backup_path, self.server_dir)
         self.logger.log("SUCCESS", f"Restored backup {backup_name}")
         return backup_path
 
@@ -512,6 +586,8 @@ class ServerInstance:
                 return False
             self.ensure_server_files()
             self.apply_server_files()
+            self.stop_background_threads()
+            self.monitor_thread = self.auto_restart_thread = self.backup_thread = None
             self._manual_stop_requested = False
             self.monitor_stop_event = threading.Event()
             self.auto_restart_stop_event = threading.Event()
@@ -551,32 +627,15 @@ class ServerInstance:
         self.get_backend().clean_stale_state()
 
     def stop_tunnel(self) -> None:
-        pid = read_pid_file(self.tunnel_pid_file)
-        if self.tunnel_process and self.tunnel_process.poll() is None:
-            self.tunnel_process.terminate()
-            try:
-                self.tunnel_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.tunnel_process.kill()
-        elif pid and is_pid_running(pid, expected_names=["playit", "ngrok"]):
-            try:
-                proc = psutil.Process(pid)
-                proc.terminate()
-                proc.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                try:
-                    proc.kill()
-                except psutil.Error:
-                    pass
-            except psutil.Error:
-                pass
-        remove_file(self.tunnel_pid_file)
+        if not stop_tunnel_process(self.server_dir, self.tunnel_process):
+            self.logger.log(
+                "ERROR",
+                "Tunnel process could not be stopped; keeping its state for retry.",
+            )
+            return
         if self.tunnel_log_handle:
-            try:
-                self.tunnel_log_handle.close()
-            except OSError:
-                pass
-            self.tunnel_log_handle = None
+            self.tunnel_log_handle.close()
+        self.tunnel_log_handle = None
         self.tunnel_process = None
 
     def restart_tunnel(self) -> None:
@@ -668,6 +727,7 @@ class ServerInstance:
             return
         self.monitor_thread = threading.Thread(
             target=self._monitor_loop,
+            args=(self.monitor_stop_event,),
             name=f"msm-monitor-{self.server_name}",
             daemon=True,
         )
@@ -681,6 +741,7 @@ class ServerInstance:
             return
         self.auto_restart_thread = threading.Thread(
             target=self._auto_restart_loop,
+            args=(self.auto_restart_stop_event,),
             name=f"msm-autorestart-{self.server_name}",
             daemon=True,
         )
@@ -698,12 +759,14 @@ class ServerInstance:
         self.next_backup_deadline = time.time() + (interval_hours * 3600)
         self.backup_thread = threading.Thread(
             target=self._backup_loop,
+            args=(self.backup_stop_event,),
             name=f"msm-backup-{self.server_name}",
             daemon=True,
         )
         self.backup_thread.start()
 
-    def _monitor_loop(self) -> None:
+    def _monitor_loop(self, stop_event=None) -> None:
+        stop_event = stop_event or self.monitor_stop_event
         pid = self.current_pid()
         if not pid:
             return
@@ -714,7 +777,7 @@ class ServerInstance:
             return
 
         self.logger.log("INFO", f"Monitoring {self.server_name}", pid=pid)
-        while not self.monitor_stop_event.wait(MONITOR_INTERVAL):
+        while not stop_event.wait(MONITOR_INTERVAL):
             pid = self.current_pid()
             if not pid:
                 break
@@ -732,8 +795,9 @@ class ServerInstance:
                 break
         self.logger.log("INFO", f"Stopped monitoring {self.server_name}")
 
-    def _backup_loop(self) -> None:
-        while not self.backup_stop_event.wait(BACKUP_POLL_INTERVAL):
+    def _backup_loop(self, stop_event=None) -> None:
+        stop_event = stop_event or self.backup_stop_event
+        while not stop_event.wait(BACKUP_POLL_INTERVAL):
             if not self.is_running():
                 break
             _config, server_config = self.refresh_config()
@@ -744,16 +808,20 @@ class ServerInstance:
             if time.time() < self.next_backup_deadline:
                 continue
             try:
-                self.create_backup(backup_type="scheduled")
+                with self._lock:
+                    if stop_event.is_set():
+                        break
+                    self._create_backup(backup_type="scheduled")
             except Exception as exc:
                 self.logger.log(
                     "ERROR", f"Scheduled backup failed for {self.server_name}: {exc}"
                 )
             self.next_backup_deadline = time.time() + (interval_hours * 3600)
 
-    def _auto_restart_loop(self) -> None:
+    def _auto_restart_loop(self, stop_event=None) -> None:
+        stop_event = stop_event or self.auto_restart_stop_event
         self.logger.log("INFO", f"Auto-restart enabled for {self.server_name}")
-        while not self.auto_restart_stop_event.wait(AUTO_RESTART_POLL_INTERVAL):
+        while not stop_event.wait(AUTO_RESTART_POLL_INTERVAL):
             if self._manual_stop_requested:
                 break
             if self.is_running():
@@ -767,38 +835,40 @@ class ServerInstance:
             self.logger.log(
                 "WARNING", f"{self.server_name} exited unexpectedly. Restarting soon."
             )
-            time.sleep(AUTO_RESTART_DELAY_SECONDS)
-            if self.auto_restart_stop_event.is_set() or self._manual_stop_requested:
+            stop_event.wait(AUTO_RESTART_DELAY_SECONDS)
+            if stop_event.is_set() or self._manual_stop_requested:
                 break
-            try:
-                started, pid = self._launch_process()
-                if not started or not pid:
+            with self._lock:
+                if stop_event.is_set() or self._manual_stop_requested:
+                    break
+                if self.is_running():
                     continue
-                _config, server_config = self.refresh_config()
-                session_id = self.db_manager.log_session_start(
-                    self.server_name,
-                    server_config["server_flavor"],
-                    server_config["server_version"],
-                )
-                write_text_file(self.session_file, str(session_id))
-                self.logger.log(
-                    "SUCCESS", f"Auto-restarted {self.server_name}", pid=pid
-                )
-                self._start_monitor_thread()
-                self._start_backup_thread()
-            except Exception as exc:
-                self.logger.log(
-                    "ERROR", f"Auto-restart failed for {self.server_name}: {exc}"
-                )
+                try:
+                    started, pid = self._launch_process()
+                    if not started or not pid:
+                        continue
+                    _config, server_config = self.refresh_config()
+                    session_id = self.db_manager.log_session_start(
+                        self.server_name,
+                        server_config["server_flavor"],
+                        server_config["server_version"],
+                    )
+                    write_text_file(self.session_file, str(session_id))
+                    self.logger.log(
+                        "SUCCESS", f"Auto-restarted {self.server_name}", pid=pid
+                    )
+                    self._start_monitor_thread()
+                    self._start_backup_thread()
+                except Exception as exc:
+                    self.logger.log(
+                        "ERROR", f"Auto-restart failed for {self.server_name}: {exc}"
+                    )
         self.logger.log("INFO", f"Auto-restart disabled for {self.server_name}")
 
     def start_tunnel(self) -> None:
         _config, server_config = self.refresh_config()
         tunnel_config = server_config.get("tunnel", {})
         if not tunnel_config.get("enabled"):
-            return
-        existing_pid = read_pid_file(self.tunnel_pid_file)
-        if existing_pid and is_pid_running(existing_pid):
             return
         provider = tunnel_config.get("provider", "playit")
         binary = tunnel_config.get("binary_path") or _config.get(
@@ -820,9 +890,10 @@ class ServerInstance:
                     (
                         "PocketMine/Bedrock requires UDP. "
                         "Ngrok is TCP-only in this implementation. "
-                        "Consider using Playit.gg instead."
+                        "Use Playit.gg instead."
                     ),
                 )
+                return
             elif provider == "playit" and protocol != "udp":
                 self.logger.log(
                     "WARNING",
@@ -831,6 +902,7 @@ class ServerInstance:
                         "Set tunnel protocol to 'udp' in server configuration."
                     ),
                 )
+                return
 
         if provider == "playit":
             status, log_handle = start_playit_agent(
@@ -838,8 +910,9 @@ class ServerInstance:
                 binary,
                 self.playit_secret_file,
                 self.logger,
+                tunnel_config={**tunnel_config, "local_port": int(local_port)},
             )
-            self.tunnel_log_handle = log_handle or self.tunnel_log_handle
+            self.tunnel_process = log_handle or self.tunnel_process
             if status.state == TUNNEL_STATUS_READY:
                 self.logger.log(
                     "SUCCESS",
@@ -878,8 +951,10 @@ class ServerInstance:
                 binary,
                 int(local_port),
                 self.logger,
+                local_host=local_host,
+                config_path=tunnel_config.get("ngrok_config_path"),
             )
-            self.tunnel_log_handle = log_handle or self.tunnel_log_handle
+            self.tunnel_process = log_handle or self.tunnel_process
             if status.state == TUNNEL_STATUS_READY:
                 self.logger.log(
                     "SUCCESS",

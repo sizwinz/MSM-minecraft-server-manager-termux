@@ -57,6 +57,7 @@ DEFAULT_SERVER_CONFIG: dict[str, Any] = {
         "local_port": None,
         "playit_tunnel_id": None,
         "last_endpoint": None,
+        "ngrok_config_path": None,
     },
     "rcon": {
         "enabled": False,
@@ -167,17 +168,25 @@ class ConfigManager:
             return copy.deepcopy(self._config)
 
     def save(self, config: dict[str, Any]) -> dict[str, Any]:
-        normalized = self._normalize(config)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(
-            f"{self.path.suffix}.tmp_{int(time.time() * 1000)}"
-        )
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            json.dump(normalized, handle, indent=4, sort_keys=True)
-        tmp_path.replace(self.path)
+        import os
+        import tempfile
+
         with self._lock:
-            self._config = copy.deepcopy(normalized)
-        return copy.deepcopy(normalized)
+            normalized = self._normalize(config)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, name = tempfile.mkstemp(
+                dir=self.path.parent, prefix=self.path.name + ".tmp_"
+            )
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    json.dump(normalized, handle, indent=4, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                Path(name).replace(self.path)
+                self._config = copy.deepcopy(normalized)
+            finally:
+                Path(name).unlink(missing_ok=True)
+            return copy.deepcopy(normalized)
 
     def mutate(self, updater) -> dict[str, Any]:
         with self._lock:

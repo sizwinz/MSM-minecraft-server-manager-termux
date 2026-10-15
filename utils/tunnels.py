@@ -96,11 +96,14 @@ def build_playit_start_command(
     binary_path: str | Path,
     secret_path: str | Path | None = None,
     socket_path: str | Path | None = None,
+    legacy: bool = False,
 ) -> list[str]:
     bin_name = Path(binary_path).name
     command = [str(binary_path)]
     if secret_path:
-        command.extend(["--secret-path", str(secret_path)])
+        command.extend(
+            ["--secret_path" if legacy else "--secret-path", str(secret_path)]
+        )
     if socket_path and bin_name in ("playit", "playitd"):
         command.extend(["--socket-path", str(socket_path)])
     return command

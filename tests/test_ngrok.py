@@ -27,7 +27,9 @@ def tmp_server_dir(tmp_path):
 
 
 def test_resolve_ngrok_binary_returns_none_when_nothing_found():
-    with patch("shutil.which", return_value=None):
+    with patch("shutil.which", return_value=None), patch(
+        "pathlib.Path.is_file", return_value=False
+    ):
         assert resolve_ngrok_binary("nonexistent") is None
 
 

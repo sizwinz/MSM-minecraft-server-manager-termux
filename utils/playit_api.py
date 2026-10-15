@@ -75,8 +75,10 @@ def _agent_headers(agent_secret: str | None) -> dict[str, str]:
     if not agent_secret:
         return {}
     token = agent_secret.strip()
-    if not token.startswith("Agent-Secret ") and not token.startswith("Session "):
-        token = f"Agent-Secret {token}"
+    if token.startswith("Agent-Secret "):
+        token = token.split(" ", 1)[1]
+    if not token.startswith("Agent-Key ") and not token.startswith("Session "):
+        token = f"Agent-Key {token}"
     return {"Authorization": token}
 
 
@@ -114,7 +116,10 @@ def auto_provision_playit_tunnel(
 def _coerce_port(value: int | str | None) -> int:
     if value is None:
         raise ValueError("local_port is required")
-    return int(value)
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise ValueError("local_port must be between 1 and 65535")
+    return port
 
 
 def _playit_tunnel_type(flavor: str | None) -> str:
@@ -176,6 +181,12 @@ def build_tunnel_update_request(
 
 
 def extract_tunnel_endpoint(tunnel: dict[str, Any]) -> str | None:
+    if (
+        tunnel.get("disabled")
+        or tunnel.get("disabled_reason")
+        or tunnel.get("active") is False
+    ):
+        return None
     # 1. Check custom domain or assigned domain (AgentTunnel schema)
     for field in ("custom_domain", "assigned_domain", "display_address"):
         val = tunnel.get(field)
@@ -243,14 +254,15 @@ def _matches_tunnel(
     name: str,
     agent_id: str,
 ) -> bool:
-    if tunnel_id and tunnel.get("id") == tunnel_id:
-        return True
     origin = tunnel.get("origin") or {}
     origin_data = (
         origin.get("data") or origin.get("details") if isinstance(origin, dict) else {}
     )
     return (
-        tunnel.get("name") == name
+        (
+            tunnel.get("name") == name
+            or bool(tunnel_id and tunnel.get("id") == tunnel_id)
+        )
         and isinstance(origin_data, dict)
         and origin_data.get("agent_id") == agent_id
     )
@@ -274,6 +286,12 @@ class PlayitApiClient:
         headers = _account_headers(session_key) or _agent_headers(agent_secret)
         self.session.headers.update(headers)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.session.close()
+
     def _call(self, path: str, request: dict[str, Any] | None = None) -> Any:
         try:
             response = self.session.post(
@@ -281,12 +299,16 @@ class PlayitApiClient:
                 json=request or {},
                 timeout=self.timeout,
             )
-            response.raise_for_status()
             payload = response.json()
+            if isinstance(payload, dict) and payload.get("status") in ("fail", "error"):
+                raise PlayitApiError(_friendly_error(payload.get("data", {})))
+            response.raise_for_status()
         except requests.RequestException as exc:
             raise PlayitApiError(str(exc)) from exc
         except ValueError as exc:
             raise PlayitApiError("Playit returned invalid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise PlayitApiError("Playit returned an invalid response.")
         return _successful_data(payload)
 
     def login_apply(self, token: str) -> str:
@@ -295,6 +317,22 @@ class PlayitApiClient:
         if not session_key:
             raise PlayitApiError("Playit did not return a session key.")
         return session_key
+
+    def prepare_claim(self, code: str) -> None:
+        self._call(
+            "/claim/setup",
+            {"code": code, "agent_type": "self-managed", "version": "MSM 6.0"},
+        )
+
+    def exchange_claim(self, code: str) -> str:
+        data = self._call("/claim/exchange", {"code": code})
+        secret = data.get("secret_key") if isinstance(data, dict) else None
+        if not isinstance(secret, str) or not secret.strip():
+            raise PlayitApiError("Playit did not return an agent secret.")
+        return secret
+
+    def delete_tunnel(self, tunnel_id: str) -> None:
+        self._call("/tunnels/delete", {"tunnel_id": tunnel_id})
 
     def agent_rundata(self) -> dict[str, Any]:
         data = self._call("/agents/rundata", {})

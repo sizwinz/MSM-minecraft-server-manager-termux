@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -255,9 +255,9 @@ class DatabaseManager:
                     MAX(player_count) AS peak_players
                 FROM performance_metrics
                 WHERE server_name = ?
-                  AND timestamp > datetime('now', '-24 hours')
+                  AND julianday(timestamp) > julianday(?)
                 """,
-                (server_name,),
+                (server_name, (datetime.now() - timedelta(hours=24)).isoformat()),
             ).fetchone()
             return {
                 "total_sessions": (

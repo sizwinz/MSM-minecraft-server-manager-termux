@@ -41,7 +41,9 @@ def test_process_state_serialization(tmp_path: Path):
     assert loaded.backend == "native_posix"
 
 
-def test_process_state_identity_validation_detects_mismatch(tmp_path: Path):
+def test_process_state_identity_validation_detects_mismatch(
+    tmp_path: Path, monkeypatch
+):
     # Dead PID
     state = ProcessState(
         schema_version=1,
@@ -56,7 +58,11 @@ def test_process_state_identity_validation_detects_mismatch(tmp_path: Path):
     # Current process with wrong create_time (simulating PID recycling)
     curr_pid = os.getpid()
     proc = psutil.Process(curr_pid)
-    real_time = proc.create_time()
+    try:
+        real_time = proc.create_time()
+    except psutil.AccessDenied:
+        real_time = time.time()
+    monkeypatch.setattr(psutil.Process, "create_time", lambda self: real_time)
 
     recycled_state = ProcessState(
         schema_version=1,

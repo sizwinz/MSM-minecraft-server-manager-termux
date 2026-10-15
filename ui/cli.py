@@ -32,16 +32,12 @@ from utils.ngrok import diagnose_ngrok, resolve_ngrok_binary
 from utils.playit import (
     diagnose_playit,
     extract_playit_secret_from_file,
-    read_playit_log_tail,
     resolve_playit_binary,
 )
 from utils.playit_api import (
-    PLAYIT_THIRD_PARTY_AUTH_URL,
     PlayitApiClient,
     PlayitApiError,
-    auto_provision_playit_tunnel,
     load_playit_session,
-    save_playit_session,
 )
 from utils.properties import load_properties
 from utils.system import (
@@ -49,19 +45,11 @@ from utils.system import (
     format_bytes,
     get_server_dir,
     get_system_info,
-    read_text_file,
     remove_file,
     run_command,
     running_on_termux,
     sanitize_input,
     write_text_file,
-)
-from utils.tunnels import (
-    build_playit_claim_exchange_command,
-    build_playit_claim_generate_command,
-    build_playit_claim_url_command,
-    extract_last_non_empty_line,
-    extract_playit_claim_url,
 )
 
 
@@ -148,8 +136,15 @@ def print_header(current_server: str | None, runtime: RuntimeManager) -> None:
 
     system_info = get_system_info()
     running_servers = runtime.running_servers()
-    ram_usage = f"{system_info['available_ram_mb']}MB / {system_info['total_ram_mb']}MB"
-    cpu_info = f"{system_info['cpu_count']} cores @ {system_info['cpu_usage']:.1f}%"
+    ram_usage = (
+        f"{system_info['available_ram_mb']}MB / {system_info['total_ram_mb']}MB"
+        if system_info["total_ram_mb"]
+        else "unavailable"
+    )
+    cpu_usage = system_info["cpu_usage"]
+    cpu_info = f"{system_info['cpu_count'] or 'unknown'} cores @ " + (
+        f"{cpu_usage:.1f}%" if cpu_usage is not None else "unavailable"
+    )
 
     print(
         f"{C.BOLD}{C.PRIMARY}  MSM{C.RESET} "
@@ -233,94 +228,67 @@ def save_tunnel_config(
 
 
 def configure_playit_api_tunnel(
-    instance,
-    config_manager: ConfigManager,
-    current_server: str,
-    logger,
+    instance, config_manager, current_server, logger
 ) -> bool:
     config = config_manager.load()
     server_config = config["servers"][current_server]
-    tunnel = server_config.setdefault("tunnel", {})
-    secret = read_text_file(instance.playit_secret_file)
+    tunnel = server_config.get("tunnel", {})
+    secret = extract_playit_secret_from_file(instance.playit_secret_file)
     if not secret:
-        logger.log(
-            "WARNING",
-            "Playit agent is not linked yet; complete the claim flow before creating a tunnel.",
-        )
+        logger.log("WARNING", "Link a Playit agent before creating its tunnel.")
         return False
-
-    session_key = load_playit_session()
-    if not session_key:
-        print()
-        print("Open this Playit authorization page:")
-        print(PLAYIT_THIRD_PARTY_AUTH_URL)
-        auth_code = input("Paste the one-time Playit auth code: ").strip()
-        if not auth_code:
-            logger.log(
-                "WARNING", "Playit API tunnel setup skipped; no auth code was entered."
-            )
-            return False
-        try:
-            session_key = PlayitApiClient().login_apply(auth_code)
-        except PlayitApiError as exc:
-            logger.log("ERROR", f"Playit authentication failed: {exc}")
-            return False
-        save_choice = (
-            input(
-                "Save the Playit login secret locally for future tunnel updates? (Y/n): "
-            )
-            .strip()
-            .lower()
-        )
-        if save_choice != "n":
-            path = save_playit_session(session_key)
-            logger.log("SUCCESS", f"Saved Playit login secret at {path}")
-
-    protocol = tunnel.get("protocol", "tcp")
+    protocol = (
+        "udp"
+        if server_config.get("server_flavor") == "pocketmine"
+        else tunnel.get("protocol", "tcp")
+    )
     local_host = tunnel.get("local_host", "127.0.0.1")
     local_port = tunnel.get("local_port") or instance.get_server_port()
-    flavor = server_config.get("server_flavor")
-    if flavor == "pocketmine":
-        protocol = "udp"
-
     try:
-        agent_data = PlayitApiClient(agent_secret=secret).agent_rundata()
-        agent_id = agent_data.get("agent_id")
-        if not agent_id:
-            raise PlayitApiError("Playit did not return an agent id.")
-        tunnel_id, endpoint = PlayitApiClient(
-            session_key=session_key
-        ).create_or_update_tunnel(
-            server_name=current_server,
-            agent_id=agent_id,
-            flavor=flavor,
-            protocol=protocol,
-            local_host=local_host,
-            local_port=local_port,
-            existing_tunnel_id=tunnel.get("playit_tunnel_id"),
-        )
-    except PlayitApiError as exc:
-        logger.log("ERROR", f"Playit tunnel automation failed: {exc}")
+        with PlayitApiClient(agent_secret=secret) as client:
+            agent_id = client.agent_rundata().get("agent_id")
+            if not agent_id:
+                raise PlayitApiError("Playit did not return an agent id.")
+            request = dict(
+                server_name=current_server,
+                agent_id=agent_id,
+                flavor=server_config.get("server_flavor"),
+                protocol=protocol,
+                local_host=local_host,
+                local_port=local_port,
+                existing_tunnel_id=tunnel.get("playit_tunnel_id"),
+            )
+            try:
+                tunnel_id, endpoint = client.create_or_update_tunnel(**request)
+            except PlayitApiError:
+                session_key = load_playit_session()
+                if not session_key:
+                    raise
+                with PlayitApiClient(session_key=session_key) as account:
+                    tunnel_id, endpoint = account.create_or_update_tunnel(**request)
+    except (PlayitApiError, ValueError) as exc:
+        logger.log("ERROR", f"Playit mapping could not be configured: {exc}")
         return False
 
-    def updater(saved_config: dict) -> None:
-        saved_tunnel = saved_config["servers"][current_server].setdefault("tunnel", {})
-        saved_tunnel["provider"] = "playit"
-        saved_tunnel["protocol"] = protocol
-        saved_tunnel["local_host"] = local_host
-        saved_tunnel["local_port"] = int(local_port)
-        saved_tunnel["playit_tunnel_id"] = tunnel_id
-        if endpoint:
-            saved_tunnel["last_endpoint"] = endpoint
+    def updater(saved):
+        target = saved["servers"][current_server]["tunnel"]
+        target.update(
+            provider="playit",
+            protocol=protocol,
+            local_host=local_host,
+            local_port=int(local_port),
+            playit_tunnel_id=tunnel_id,
+            last_endpoint=endpoint,
+        )
 
     config_manager.mutate(updater)
     if endpoint:
         write_text_file(instance.playit_endpoint_file, endpoint)
-        logger.log("SUCCESS", f"Playit tunnel is configured: {endpoint}")
     else:
-        logger.log(
-            "SUCCESS", "Playit tunnel is configured; endpoint is pending allocation."
-        )
+        remove_file(instance.playit_endpoint_file)
+    logger.log(
+        "SUCCESS", f"Playit mapping saved: {endpoint or 'waiting for allocation'}"
+    )
     return True
 
 
@@ -413,11 +381,13 @@ def ngrok_setup_wizard(
                 resolved_binary = resolve_ngrok_binary(custom_input)
                 binary_path = resolved_binary or custom_input
 
-    authtoken = input("\nNgrok authtoken (press Enter to keep existing): ").strip()
+    from getpass import getpass
+
+    authtoken = getpass("\nNgrok authtoken (press Enter to keep existing): ").strip()
     if authtoken and resolved_binary:
         result = run_command(
             [resolved_binary, "config", "add-authtoken", authtoken],
-            logger=logger,
+            logger=None,
             check=False,
             capture_output=True,
         )
@@ -442,300 +412,117 @@ def ngrok_setup_wizard(
     pause()
 
 
-def playit_setup_wizard(
-    runtime: RuntimeManager,
-    config_manager: ConfigManager,
-    current_server: str,
-    logger,
-) -> None:
+def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None:
+    import secrets
+    from utils.playit import save_playit_secret
+
     instance = runtime.get_instance(current_server)
+    instance.ensure_server_files()
     config = config_manager.load()
-    tunnel = config["servers"][current_server].setdefault("tunnel", {})
-
-    stored_provider = tunnel.get("provider")
-    stored_binary = str(tunnel.get("binary_path") or "")
-    if (
-        stored_provider == "playit"
-        and stored_binary
-        and "ngrok" not in Path(stored_binary).name.lower()
-    ):
-        candidate = stored_binary
-    else:
-        candidate = "playit"
-
-    resolved_binary = resolve_playit_binary(candidate) or resolve_playit_binary(
-        "playit"
+    tunnel = config["servers"][current_server].get("tunnel", {})
+    candidate = (
+        tunnel.get("binary_path") if tunnel.get("provider") == "playit" else None
     )
-    binary_path = resolved_binary or "playit-cli"
-
-    print_header(current_server, runtime)
-    print(f" {C.BOLD}Playit.gg Fast Setup:{C.RESET} {current_server}\n")
-    print_connection_summary(instance)
-    print()
-
-    if not resolved_binary:
+    resolved = resolve_playit_binary(candidate)
+    if not resolved and running_on_termux():
+        if input("Install Playit with Termux pkg? (Y/n): ").strip().lower() != "n":
+            for command in (
+                ["pkg", "install", "-y", "tur-repo"],
+                ["pkg", "install", "-y", "playit"],
+            ):
+                outcome = run_command(
+                    command, logger=logger, check=False, capture_output=True
+                )
+                if not outcome or outcome.returncode:
+                    logger.log("ERROR", "Playit package installation failed.")
+                    pause()
+                    return
+            resolved = resolve_playit_binary()
+    if not resolved:
+        custom = input("Playit daemon executable path: ").strip()
+        resolved = resolve_playit_binary(custom) if custom else None
+    if not resolved:
         logger.log(
-            "WARNING",
-            "Playit binary was not found on this device.",
+            "ERROR",
+            "A Playit daemon is required. Install playitd or a standalone agent.",
         )
-        if running_on_termux():
-            prompt = "Install playit automatically via Termux package manager? (Y/n): "
-            if input(prompt).strip().lower() != "n":
-                logger.log("INFO", "Installing playit...")
-                run_command(
-                    ["pkg", "install", "-y", "tur-repo"],
-                    logger=logger,
-                    check=False,
-                    capture_output=True,
-                )
-                run_command(
-                    ["pkg", "install", "-y", "playit"],
-                    logger=logger,
-                    check=False,
-                    capture_output=True,
-                )
-                resolved_binary = resolve_playit_binary("playit")
-                if resolved_binary:
-                    logger.log("SUCCESS", f"Playit installed at {resolved_binary}")
-                    binary_path = resolved_binary
-        else:
-            custom_input = input("Enter custom playit binary path: ").strip()
-            if custom_input:
-                resolved_binary = resolve_playit_binary(custom_input)
-                binary_path = resolved_binary or custom_input
+        pause()
+        return
 
-    if resolved_binary:
-        if instance.playit_secret_file.exists():
-            print(
-                f" {C.GREEN}✓{C.RESET} Existing Playit credentials found on this server."
+    secret = extract_playit_secret_from_file(instance.playit_secret_file)
+    if secret:
+        try:
+            with PlayitApiClient(agent_secret=secret, timeout=5) as client:
+                client.agent_rundata()
+        except PlayitApiError as exc:
+            logger.log(
+                "WARNING", f"Saved Playit credentials are no longer usable: {exc}"
             )
-            relink = (
-                input(
-                    f" {C.BOLD}Do you want to re-link a fresh Playit agent? (y/N): {C.RESET}"
-                )
+            secret = None
+        else:
+            if (
+                input("Link a fresh agent instead of the existing one? (y/N): ")
                 .strip()
                 .lower()
-            )
-            if relink == "y":
-                instance.stop_tunnel()
-                remove_file(instance.playit_secret_file)
-                remove_file(instance.playit_endpoint_file)
-                remove_file(instance.server_dir / ".msm.playit.log")
-                logger.log(
-                    "INFO", "Cleared previous agent secret. Starting fresh linking..."
-                )
-
-    if resolved_binary and Path(resolved_binary).name == "playit-cli":
-        parent = Path(resolved_binary).parent
-        if (parent / "playit").exists():
-            resolved_binary = str(parent / "playit")
-        elif (parent / "playitd").exists():
-            resolved_binary = str(parent / "playitd")
-        else:
-            resolved_binary = (
-                shutil.which("playit") or shutil.which("playitd") or resolved_binary
-            )
-    binary_path = resolved_binary or "playit"
-
-    if resolved_binary and not instance.playit_secret_file.exists():
-        secret_file = instance.playit_secret_file
-        socket_file = instance.server_dir / ".msm.playit.sock"
-        if socket_file.exists():
-            socket_file.unlink(missing_ok=True)
-
-        log_path = instance.server_dir / ".msm.playit.log"
-        log_handle = log_path.open("w", encoding="utf-8")
-
-        daemon_cmd = [
-            resolved_binary,
-            "--secret-path",
-            str(secret_file),
-            "--socket-path",
-            str(socket_file),
-        ]
-        daemon = subprocess.Popen(
-            daemon_cmd,
-            cwd=instance.server_dir,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-
+                == "y"
+            ):
+                secret = None
+    if not secret:
+        code = secrets.token_hex(5)
         try:
-            time.sleep(1)
-            if daemon.poll() is not None:
-                log_handle.flush()
-                tail = read_playit_log_tail(instance.server_dir)
-                logger.log("ERROR", f"Playit daemon exited: {tail}")
-
-            claim_url = None
-            for _ in range(6):
-                time.sleep(0.5)
-                tail = read_playit_log_tail(instance.server_dir)
-                claim_url = extract_playit_claim_url(tail)
-                if claim_url:
-                    break
-
-            cli_binary = resolved_binary
-            claim_code = None
-            if not claim_url:
-                parent = Path(resolved_binary).parent
-                possible_cli = parent / "playit-cli"
-                if possible_cli.exists():
-                    cli_binary = str(possible_cli)
-                else:
-                    cli_binary = shutil.which("playit-cli") or resolved_binary
-
-                for _ in range(10):
-                    claim_gen = run_command(
-                        build_playit_claim_generate_command(
-                            cli_binary, socket_path=socket_file
-                        ),
-                        logger=logger,
-                        check=False,
-                        capture_output=True,
-                        cwd=instance.server_dir,
-                    )
-                    if claim_gen and claim_gen.stdout:
-                        raw = extract_last_non_empty_line(claim_gen.stdout)
-                        if (
-                            raw
-                            and not raw.startswith("Error")
-                            and not raw.startswith("error")
-                        ):
-                            claim_code = raw.split()[-1]
-                            break
-                    time.sleep(0.5)
-
-                if claim_code:
-                    url_res = run_command(
-                        build_playit_claim_url_command(
-                            cli_binary, claim_code, socket_path=socket_file
-                        ),
-                        logger=logger,
-                        check=False,
-                        capture_output=True,
-                        cwd=instance.server_dir,
-                    )
-                    if url_res and url_res.stdout:
-                        claim_url = extract_playit_claim_url(
-                            url_res.stdout
-                        ) or extract_last_non_empty_line(url_res.stdout)
-
-            if claim_url:
-                width = min(get_terminal_width(), 70)
-                print(f" {C.CYAN}┌{'─' * (width - 4)}┐{C.RESET}")
-                print(f" {C.CYAN}│{C.RESET} {C.BOLD}Playit Claim URL:{C.RESET}")
-                print(f" {C.CYAN}│{C.RESET} {C.UNDERLINE}{claim_url}{C.RESET}")
-                print(f" {C.CYAN}└{'─' * (width - 4)}┘{C.RESET}\n")
-                print(
-                    f" {C.DIM}Open the URL in your browser and click 'Add Agent'.{C.RESET}"
-                )
-            elif claim_code:
-                logger.log("INFO", f"Claim code: {claim_code}")
-            else:
-                tail = read_playit_log_tail(instance.server_dir, line_count=5)
-                logger.log(
-                    "WARNING",
-                    f"Waiting for Playit agent to produce claim link... {tail}",
-                )
-
-            step = input(
-                "\nOpen the URL, press Enter and accept the agent in the website (or 's' to skip): "
-            ).strip()
-            if step.lower() != "s":
-                if claim_code:
-                    exchange_res = run_command(
-                        build_playit_claim_exchange_command(
-                            cli_binary,
-                            claim_code,
-                            secret_path=secret_file,
-                            socket_path=socket_file,
-                        ),
-                        logger=logger,
-                        check=False,
-                        capture_output=True,
-                        cwd=instance.server_dir,
-                    )
-                    if exchange_res:
-                        out = (
-                            f"{exchange_res.stdout or ''}\n"
-                            f"{exchange_res.stderr or ''}"
-                        ).strip()
-                        for line in out.splitlines():
-                            line_str = line.strip()
-                            if "secret" in line_str.lower() and ":" in line_str:
-                                sec_val = line_str.split(":", 1)[1].strip()
-                                if sec_val and not sec_val.startswith("{"):
-                                    write_text_file(secret_file, sec_val)
-                                    break
-                            elif (
-                                len(line_str) in (32, 64)
-                                and not line_str.startswith("Error")
-                                and not line_str.startswith("error")
-                            ):
-                                write_text_file(secret_file, line_str)
-                                break
-
-                for _ in range(10):
-                    if secret_file.exists() and secret_file.stat().st_size > 0:
+            with PlayitApiClient(timeout=5) as client:
+                client.prepare_claim(code)
+                print(f"Open https://playit.gg/claim/{code} and approve this agent.")
+                if (
+                    input("Press Enter after approval, or 's' to cancel: ")
+                    .strip()
+                    .lower()
+                    == "s"
+                ):
+                    return
+                deadline = time.monotonic() + 45
+                while time.monotonic() < deadline:
+                    try:
+                        secret = client.exchange_claim(code)
                         break
-                    global_toml = Path.home() / ".config" / "playit_gg" / "playit.toml"
-                    if global_toml.exists():
-                        toml_sec = extract_playit_secret_from_file(global_toml)
-                        if toml_sec:
-                            write_text_file(secret_file, toml_sec)
-                            break
-                    time.sleep(0.5)
-
-                if secret_file.exists() and secret_file.stat().st_size > 0:
-                    logger.log(
-                        "SUCCESS",
-                        f"Stored playit secret for {current_server}.",
+                    except PlayitApiError as exc:
+                        if "NotAccepted" not in str(exc):
+                            raise
+                        time.sleep(1)
+                if not secret:
+                    raise PlayitApiError(
+                        "Approval is still pending; retry setup after approving the agent."
                     )
-                    sec_token = read_text_file(secret_file)
-                    if sec_token:
-                        cfg = config_manager.load()
-                        srv_cfg = cfg.get("servers", {}).get(current_server, {})
-                        srv_flavor = srv_cfg.get("server_flavor")
-                        srv_port = int(
-                            srv_cfg.get("server_settings", {}).get("port", 25565)
-                        )
-                        _tid, ep = auto_provision_playit_tunnel(
-                            current_server,
-                            sec_token,
-                            flavor=srv_flavor,
-                            local_port=srv_port,
-                        )
-                        if ep:
-                            write_text_file(instance.playit_endpoint_file, ep)
-                            logger.log(
-                                "SUCCESS",
-                                f"Created Playit tunnel for {current_server}: {ep}",
-                            )
-                else:
-                    logger.log(
-                        "ERROR",
-                        "Playit account linking not completed yet.",
-                    )
-        finally:
-            daemon.terminate()
-            try:
-                daemon.wait(timeout=2)
-            except Exception:
-                daemon.kill()
-            log_handle.close()
+            instance.stop_tunnel()
+            save_playit_secret(instance.playit_secret_file, secret)
+            remove_file(instance.playit_endpoint_file)
 
+            def reset(saved):
+                saved["servers"][current_server]["tunnel"]["playit_tunnel_id"] = None
+
+            config_manager.mutate(reset)
+        except PlayitApiError as exc:
+            logger.log("ERROR", f"Playit linking failed: {exc}")
+            pause()
+            return
+    if not configure_playit_api_tunnel(
+        instance, config_manager, current_server, logger
+    ):
+        logger.log(
+            "WARNING",
+            "Agent linked, but mapping setup is incomplete. Check diagnostics or retry setup.",
+        )
+        pause()
+        return
     save_tunnel_config(
         instance,
         config_manager,
         current_server,
         provider="playit",
-        binary_path=str(binary_path),
+        binary_path=resolved,
         enabled=True,
         logger=logger,
     )
-    logger.log("SUCCESS", f"Playit tunnel enabled for {current_server}.")
     pause()
 
 

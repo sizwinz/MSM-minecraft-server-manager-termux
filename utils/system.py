@@ -10,7 +10,6 @@ import shlex
 import shutil
 import socket
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -157,12 +156,19 @@ def check_disk_space(
 
 def get_system_info() -> dict[str, Any]:
     """Best-effort host system summary without blocking on CPU sampling."""
+    total_ram_mb = available_ram_mb = 0
     try:
         memory = psutil.virtual_memory()
         total_ram_mb = memory.total // (1024 * 1024)
         available_ram_mb = memory.available // (1024 * 1024)
-        cpu_count = psutil.cpu_count(logical=True) or os.cpu_count() or 2
+    except (psutil.Error, OSError):
+        pass
+    try:
         cpu_usage = psutil.cpu_percent(interval=None)
+    except (psutil.Error, OSError):
+        cpu_usage = None
+    cpu_count = os.cpu_count()
+    if total_ram_mb:
         max_safe_ram_mb = min(
             int(total_ram_mb * MAX_RAM_PERCENTAGE / 100),
             (
@@ -171,23 +177,16 @@ def get_system_info() -> dict[str, Any]:
                 else available_ram_mb - 256
             ),
         )
-        return {
-            "total_ram_mb": total_ram_mb,
-            "available_ram_mb": available_ram_mb,
-            "max_safe_ram_mb": max(max_safe_ram_mb, 512),
-            "cpu_count": cpu_count,
-            "cpu_usage": cpu_usage,
-            "platform": sys.platform,
-        }
-    except Exception:
-        return {
-            "total_ram_mb": 4096,
-            "available_ram_mb": 2048,
-            "max_safe_ram_mb": 3072,
-            "cpu_count": 2,
-            "cpu_usage": 0.0,
-            "platform": "unknown",
-        }
+    else:
+        max_safe_ram_mb = 512
+    return {
+        "total_ram_mb": total_ram_mb,
+        "available_ram_mb": available_ram_mb,
+        "max_safe_ram_mb": max(0, max_safe_ram_mb),
+        "cpu_count": cpu_count,
+        "cpu_usage": cpu_usage,
+        "platform": detect_platform().os_type.value,
+    }
 
 
 def get_server_dir(server_name: str) -> Path:
