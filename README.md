@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/MSM.svg" alt="MSM project logo" width="180" />
+
 # MSM - Minecraft Server Manager
 
 **High-performance, production-grade cross-platform Minecraft server manager.**  
