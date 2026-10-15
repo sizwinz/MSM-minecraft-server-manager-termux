@@ -74,6 +74,13 @@ function Check-Python {
     }
 
     $verOutput = (& $py.Source --version 2>&1).ToString().Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Python could not be executed: $($py.Source)"
+    }
+    & $py.Source -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
+    if ($LASTEXITCODE -ne 0) {
+        throw "MSM requires Python 3.10 or newer. Found: $verOutput"
+    }
     Write-StepSuccess 1 6 "$verOutput ($($py.Source))"
     return $py.Source
 }
@@ -147,11 +154,12 @@ function Setup-Venv([string]$pythonPath, [string]$installDir) {
     $venvDir = Join-Path $installDir ".venv"
     $venvPython = Join-Path $venvDir "Scripts\python.exe"
     if ((Test-Path $venvDir) -and (Test-Path $venvPython)) {
+        & $venvPython -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Existing .venv requires Python 3.10 or newer. Rename .venv and rerun the installer."
+        }
         Write-StepSuccess 5 6 "Virtual environment verified"
     } else {
-        if (Test-Path $venvDir) {
-            Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
-        }
         Write-SubInfo "Initializing new virtualenv..."
         & $pythonPath -m venv $venvDir
         if ($LASTEXITCODE -ne 0) {
@@ -169,15 +177,22 @@ function Install-Dependencies([string]$installDir) {
     }
 
     Write-SubInfo "Upgrading pip and installing requirements.txt..."
-    & $venvPython -m pip install --upgrade pip --quiet 2>$null
+    & $venvPython -m pip install --upgrade pip --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to upgrade pip in the virtual environment."
+    }
     $reqFile = Join-Path $installDir "requirements.txt"
-    if (Test-Path $reqFile) {
-        & $venvPython -m pip install -r $reqFile --quiet 2>$null
+    if (-not (Test-Path $reqFile)) {
+        throw "requirements.txt was not found at $reqFile"
+    }
+    & $venvPython -m pip install -r $reqFile --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to install Python dependencies. See pip output above."
     }
 
     # Generate convenient launcher batch script (msm.cmd)
     $cmdLauncher = Join-Path $installDir "msm.cmd"
-    $cmdContent = "@echo off`r`ncall `"%~dp0.venv\Scripts\activate.bat`"`r`npython `"%~dp0msm.py`" %*"
+    $cmdContent = "@echo off`r`n`"%~dp0.venv\Scripts\python.exe`" `"%~dp0msm.py`" %*`r`nexit /b %errorlevel%`r`n"
     [System.IO.File]::WriteAllText($cmdLauncher, $cmdContent, [System.Text.Encoding]::ASCII)
 
     # Generate powershell launcher (msm.ps1)

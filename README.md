@@ -46,12 +46,16 @@ It orchestrates server binaries directly from upstream vendor APIs, abstracts pr
 
 | Platform | Environments / Architectures | Process Backend | Console Mode | Java Provisioning | PocketMine (PMMP) |
 |---|---|---|---|---|---|
-| **Linux** | Debian, Ubuntu, Arch, Fedora, Alpine, openSUSE, Void (`x86_64`, `aarch64`, `armv7`) | `screen` or `native_posix` | Full Screen Attach / Live Log Tail | Adoptium JRE (8, 17, 21, 25) | Native CLI / PMMP PHP |
-| **Android (Termux)** | Termux on Android 7+ (`aarch64`, `armv7`, `x86_64`) | `screen` | Full Screen Attach / Live Log Tail | Termux `pkg` (`tur-repo`) | Termux ZTS PHP |
+| **Linux** | Debian, Ubuntu, Arch, Fedora, Alpine, openSUSE, Void (`x86_64`, `aarch64`, `armv7`) | `screen` or `native_posix` | Full Screen Attach / Live Log Tail | Adoptium JRE (8, 17, 21, 25); native OpenJDK packages on Alpine | Compatible 64-bit PMMP PHP |
+| **Android (Termux)** | Termux on Android 7+ (`aarch64`, `armv7`, `x86_64`) | `screen` or `native_posix` | Full Screen Attach / Live Log Tail | Termux `pkg` (`tur-repo`) | Compatible 64-bit PMMP PHP |
 | **Windows** | Windows 10 & 11 (`x86_64`, `arm64`) | `windows` | Live Log Tail & Command Dispatch | Adoptium JRE / Winget / PATH | Custom PMMP PHP Binaries |
 | **macOS** | macOS 12+ (Intel `x86_64` & Apple Silicon `arm64`) | `screen` or `native_posix` | Full Screen Attach / Live Log Tail | Adoptium JRE / Homebrew | Custom PMMP PHP Binaries |
 | **WSL (WSL1 / WSL2)** | Ubuntu, Debian, Arch on Windows Subsystem for Linux | `screen` or `native_posix` | Full Screen Attach / Live Log Tail | Adoptium JRE / System pkgs | System PHP |
-| **FreeBSD** | FreeBSD 13+ (`amd64`, `aarch64`) | `native_posix` or `screen` | Screen Attach (if installed) / Log Tail | FreeBSD `pkg` (openjdk17/21) | FreeBSD `pkg` PHP |
+| **FreeBSD** | FreeBSD 13+ (`amd64`, `aarch64`) | `native_posix` or `screen` | Screen Attach (if installed) / Log Tail | FreeBSD `pkg` (openjdk17/21) | Custom compatible PHP with PMMP threading extensions |
+
+This table describes implementation support, not completed live validation on every OS and CPU. CI is configured for Windows, Linux and macOS; FreeBSD and physical Android still require device testing. PocketMine requires a compatible 64-bit PHP runtime with ZTS and threading extensions; standard system PHP alone is insufficient. Automatic provisioning depends on matching upstream binaries. Windows ARM64 and FreeBSD may require a custom runtime.
+
+Native Windows/POSIX backends use RCON for console commands and graceful Minecraft shutdown; a retained stdin console is not implemented. PocketMine command control therefore requires GNU Screen where available or an independently configured RCON integration. Windows process cleanup uses process-tree traversal, not Job Objects. Alpine and FreeBSD installations may need additional OpenJDK packages for the selected Minecraft version, configured through `java_homes`.
 
 ---
 

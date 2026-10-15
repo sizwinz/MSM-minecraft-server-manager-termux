@@ -428,6 +428,7 @@ def get_java_path(
             for cand in (
                 Path(custom_home) / "bin" / "java",
                 Path(custom_home) / "bin" / "java.exe",
+                Path(custom_home) / "Contents" / "Home" / "bin" / "java",
                 Path(custom_home),
             ):
                 result.append(str(cand))
@@ -462,6 +463,21 @@ def get_java_path(
                 base_path / "bin" / "java.exe",
             ):
                 result.append(str(candidate))
+
+            # Vendor installs carry patch versions (jdk-21.0.x+...), and macOS
+            # distributions put the actual Java home inside Contents/Home.
+            homes = [base_path]
+            try:
+                homes.extend(sorted(p for p in base_path.iterdir() if p.is_dir()))
+            except OSError:
+                pass
+            for home in homes:
+                for relative in (
+                    Path("bin/java"),
+                    Path("bin/java.exe"),
+                    Path("Contents/Home/bin/java"),
+                ):
+                    result.append(str(home / relative))
 
         # System java on PATH
         java_on_path = shutil.which("java")
@@ -669,8 +685,7 @@ def detect_php_runtime(php_binary: str | Path | None, logger=None) -> dict[str, 
     has_pmmpthread = bool({"pmmpthread", "pthreads"} & modules_set)
     has_yaml = "yaml" in modules_set
 
-    # Compatible if ZTS or pmmpthread/pthreads module is present
-    compatible = is_zts or has_pmmpthread
+    compatible = is_zts and has_pmmpthread
     return {
         "exists": True,
         "version": version_str,
@@ -714,7 +729,7 @@ def get_php_path(
             candidate = s_dir / rel
             if candidate.is_file():
                 info = detect_php_runtime(candidate, logger=logger)
-                if info["exists"] and (info["compatible"] or "bin/php" in str(rel)):
+                if info["exists"] and info["compatible"]:
                     return str(candidate)
 
     # 3. Global MSM PHP directory and COMMON_PHP_BASES
@@ -732,7 +747,7 @@ def get_php_path(
             candidate = base / rel
             if candidate.is_file():
                 info = detect_php_runtime(candidate, logger=logger)
-                if info["exists"] and (info["compatible"] or "bin/php" in str(rel)):
+                if info["exists"] and info["compatible"]:
                     return str(candidate)
 
     # 4. System PHP on PATH (verify compatibility)
@@ -756,13 +771,13 @@ def get_php_path(
             installed_php = download_php_binary(PHP_DIR, logger=logger)
             if installed_php and installed_php.exists():
                 info = detect_php_runtime(installed_php, logger=logger)
-                if info["exists"]:
+                if info["exists"] and info["compatible"]:
                     return str(installed_php)
                 if logger:
                     logger.log(
                         "ERROR",
-                        f"Downloaded PHP binary ({installed_php}) cannot be executed "
-                        f"directly on this system environment.",
+                        f"Downloaded PHP binary ({installed_php}) is not a compatible "
+                        f"PocketMine runtime on this system.",
                     )
         except Exception as exc:
             if logger:

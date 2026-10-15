@@ -47,7 +47,7 @@ def build_playit_claim_generate_command(
     binary_path: str | Path, socket_path: str | Path | None = None
 ) -> list[str]:
     cmd = [str(binary_path)]
-    if socket_path and Path(binary_path).name == "playit-cli":
+    if socket_path and Path(binary_path).stem.lower() == "playit-cli":
         cmd.extend(["--socket-path", str(socket_path)])
     cmd.extend(["claim", "generate"])
     return cmd
@@ -57,7 +57,7 @@ def build_playit_claim_url_command(
     binary_path: str | Path, claim_code: str, socket_path: str | Path | None = None
 ) -> list[str]:
     cmd = [str(binary_path)]
-    if socket_path and Path(binary_path).name == "playit-cli":
+    if socket_path and Path(binary_path).stem.lower() == "playit-cli":
         cmd.extend(["--socket-path", str(socket_path)])
     cmd.extend(["claim", "url", claim_code])
     return cmd
@@ -70,7 +70,7 @@ def build_playit_claim_exchange_command(
     socket_path: str | Path | None = None,
 ) -> list[str]:
     command = [str(binary_path)]
-    if socket_path and Path(binary_path).name == "playit-cli":
+    if socket_path and Path(binary_path).stem.lower() == "playit-cli":
         command.extend(["--socket-path", str(socket_path)])
     # In 1.0.6+, playit-cli does not accept --secret-path. The daemon manages it via IPC.
     # We still accept secret_path for backwards compatibility with older playit versions if needed,
@@ -86,7 +86,7 @@ def build_playit_setup_command(
     socket_path: str | Path | None = None,
 ) -> list[str]:
     command = [str(binary_path)]
-    if socket_path and Path(binary_path).name == "playit-cli":
+    if socket_path and Path(binary_path).stem.lower() == "playit-cli":
         command.extend(["--socket-path", str(socket_path)])
     command.append("setup")
     return command
@@ -98,7 +98,7 @@ def build_playit_start_command(
     socket_path: str | Path | None = None,
     legacy: bool = False,
 ) -> list[str]:
-    bin_name = Path(binary_path).name
+    bin_name = Path(binary_path).stem.lower()
     command = [str(binary_path)]
     if secret_path:
         command.extend(

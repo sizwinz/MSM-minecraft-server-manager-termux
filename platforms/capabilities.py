@@ -28,6 +28,8 @@ def build_capabilities(
         if screen_available is None
         else screen_available
     )
+    # Git/Cygwin tools on PATH do not provide a native Windows Screen backend.
+    has_screen = has_screen and not is_windows
     supported_backends: list[str] = []
     notes: list[str] = []
 
@@ -36,13 +38,10 @@ def build_capabilities(
         default_backend = "windows"
         supports_posix_signals = False
         supports_windows_process_groups = True
-        supports_job_objects = True
+        supports_job_objects = False
         supports_file_permissions = False
         supports_console_attachment = False
-        supports_pocketmine_binary = architecture in (
-            Architecture.X86_64,
-            Architecture.X86,
-        )
+        supports_pocketmine_binary = architecture == Architecture.X86_64
         supports_java_provisioning = True
         notes.append("Windows native process backend active.")
         if not has_screen:
@@ -66,7 +65,10 @@ def build_capabilities(
         supports_console_attachment = has_screen
 
         if is_termux:
-            supports_pocketmine_binary = True
+            supports_pocketmine_binary = architecture in (
+                Architecture.ARM64,
+                Architecture.X86_64,
+            )
             supports_java_provisioning = True
             notes.append("Termux environment: pkg-based Java & PMMP provisioning.")
         elif is_macos:

@@ -91,7 +91,10 @@ class NativePosixBackend(ProcessBackend):
             if hasattr(os, "killpg") and hasattr(os, "getpgid"):
                 try:
                     pgid = os.getpgid(state.pid)
-                    os.killpg(pgid, signal.SIGTERM)
+                    if pgid == state.pid:
+                        os.killpg(pgid, signal.SIGTERM)
+                    else:
+                        os.kill(state.pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError, OSError):
                     pass
             else:
@@ -124,7 +127,8 @@ class NativePosixBackend(ProcessBackend):
         if hasattr(os, "killpg") and hasattr(os, "getpgid"):
             try:
                 pgid = os.getpgid(pid)
-                os.killpg(pgid, signal.SIGTERM)
+                if pgid == pid:
+                    os.killpg(pgid, signal.SIGTERM)
             except (OSError, ProcessLookupError):
                 pass
 
@@ -161,7 +165,8 @@ class NativePosixBackend(ProcessBackend):
         if hasattr(os, "killpg") and hasattr(os, "getpgid"):
             try:
                 pgid = os.getpgid(pid)
-                os.killpg(pgid, signal.SIGKILL)
+                if pgid == pid:
+                    os.killpg(pgid, signal.SIGKILL)
             except (OSError, ProcessLookupError):
                 pass
 

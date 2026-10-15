@@ -43,18 +43,19 @@ def resolve_playit_binary(binary_path: str | None = None) -> str | None:
     candidates: list[str] = []
     if binary_path:
         # If binary_path points to playit-cli, check for sibling playit / playitd daemon
-        if Path(binary_path).name == "playit-cli":
+        if Path(binary_path).stem.lower() == "playit-cli":
             cli_parent = Path(binary_path).parent
-            if (cli_parent / "playit").exists():
-                candidates.append(str(cli_parent / "playit"))
-            if (cli_parent / "playitd").exists():
-                candidates.append(str(cli_parent / "playitd"))
+            suffix = ".exe" if Path(binary_path).suffix.lower() == ".exe" else ""
+            for daemon in ("playit", "playitd"):
+                sibling = cli_parent / f"{daemon}{suffix}"
+                if sibling.is_file():
+                    candidates.append(str(sibling))
         else:
             candidates.append(binary_path)
 
-    candidates.extend(["playit", "playitd"])
+    candidates.extend(["playit", "playitd", "playit.exe", "playitd.exe"])
 
-    if binary_path and Path(binary_path).name == "playit-cli":
+    if binary_path and Path(binary_path).stem.lower() == "playit-cli":
         candidates.append(binary_path)
 
     # Remove duplicates while preserving order

@@ -38,11 +38,15 @@ class ProcessManager:
             backend_type = self.platform.capabilities.default_backend
         else:
             backend_type = requested
+        if backend_type not in ("windows", "screen", "native_posix"):
+            backend_type = "windows" if sys.platform == "win32" else "native_posix"
 
         # Platform compatibility fallback checks
         if backend_type == "windows" and sys.platform != "win32":
             backend_type = "native_posix"
-        elif backend_type == "screen" and shutil.which("screen") is None:
+        elif backend_type == "screen" and (
+            sys.platform == "win32" or shutil.which("screen") is None
+        ):
             if self.logger:
                 self.logger.log(
                     "WARNING",

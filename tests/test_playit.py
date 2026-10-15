@@ -42,6 +42,15 @@ def test_resolve_playit_binary_custom_path_takes_priority(tmp_path):
     assert result == str(fake_bin)
 
 
+def test_resolve_windows_playit_controller_uses_sibling_daemon(tmp_path, monkeypatch):
+    cli = tmp_path / "playit-cli.exe"
+    daemon = tmp_path / "playitd.exe"
+    cli.touch()
+    daemon.touch()
+    monkeypatch.setattr("utils.playit.shutil.which", lambda _: None)
+    assert resolve_playit_binary(str(cli)) == str(daemon)
+
+
 def test_save_and_get_playit_endpoint(tmp_server_dir):
     assert get_saved_playit_endpoint(tmp_server_dir) is None
     save_playit_endpoint(tmp_server_dir, "mc.example.playit.gg:12345")

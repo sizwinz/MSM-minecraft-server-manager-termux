@@ -613,11 +613,11 @@ def get_system_arch_and_os() -> tuple[str, str]:
     from utils.system import running_on_termux
 
     machine = platform.machine().lower()
-    if machine in ("aarch64", "arm64", "armv8", "armv8l"):
+    if machine in ("aarch64", "arm64", "armv8"):
         arch = "arm64"
     elif machine in ("x86_64", "amd64"):
         arch = "x86_64"
-    elif machine in ("armv7l", "armv7", "armhf", "arm"):
+    elif machine in ("armv7l", "armv7", "armv8l", "armhf", "arm"):
         arch = "arm"
     elif machine in ("x86", "i386", "i686"):
         arch = "x86"
@@ -683,10 +683,6 @@ def download_php_binary(
                     lambda n: "linux" in n
                     and ("x86_64" in n or "x64" in n or "amd64" in n)
                 )
-            elif arch in ("arm", "armv7l", "armv7", "armhf"):
-                target_filters.append(
-                    lambda n: "android" in n and ("arm" in n or "armv7" in n)
-                )
         elif os_name == "Linux":
             if arch in ("x86_64", "amd64", "x64"):
                 target_filters.append(
@@ -697,28 +693,26 @@ def download_php_binary(
                 target_filters.append(
                     lambda n: "linux" in n and ("arm64" in n or "aarch64" in n)
                 )
-                target_filters.append(
-                    lambda n: "android" in n and ("arm64" in n or "aarch64" in n)
-                )
         elif os_name == "Windows":
-            target_filters.append(
-                lambda n: "windows" in n and ("x64" in n or "x86_64" in n)
-            )
+            if arch == "x86_64":
+                target_filters.append(
+                    lambda n: "windows" in n and ("x64" in n or "x86_64" in n)
+                )
+            elif arch == "arm64":
+                target_filters.append(
+                    lambda n: "windows" in n and ("arm64" in n or "aarch64" in n)
+                )
         elif os_name == "MacOS":
             if arch in ("arm64", "aarch64"):
                 target_filters.append(
                     lambda n: ("macos" in n or "darwin" in n)
                     and ("arm64" in n or "aarch64" in n)
                 )
-            else:
+            elif arch == "x86_64":
                 target_filters.append(
                     lambda n: ("macos" in n or "darwin" in n)
                     and ("x86_64" in n or "x64" in n)
                 )
-        else:
-            target_filters.append(
-                lambda n: "linux" in n and ("x86_64" in n or "x64" in n)
-            )
 
         matched_asset = None
         for check_fn in target_filters:

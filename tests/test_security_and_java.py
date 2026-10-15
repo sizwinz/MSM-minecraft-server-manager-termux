@@ -68,3 +68,30 @@ def test_common_java_home_bases_skips_empty_java_home(
         assert Path("") not in reloaded.COMMON_JAVA_HOME_BASES
     finally:
         importlib.reload(constants)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "jdk-21.0.9+10/bin/java.exe",
+        "temurin-21.jdk/Contents/Home/bin/java",
+        "21/Contents/Home/bin/java",
+        "openjdk21/bin/java",
+    ],
+)
+def test_java_discovery_handles_vendor_and_platform_layouts(
+    tmp_path, monkeypatch, relative
+):
+    from utils.system import get_java_path
+
+    binary = tmp_path / relative
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    monkeypatch.setattr("utils.system.COMMON_JAVA_HOME_BASES", [tmp_path])
+    monkeypatch.setattr("utils.system.shutil.which", lambda _: None)
+    monkeypatch.setattr("utils.system.running_on_termux", lambda: False)
+    monkeypatch.setattr(
+        "utils.system.detect_java_version",
+        lambda candidate, **kw: "21" if Path(candidate) == binary else None,
+    )
+    assert get_java_path("1.21.1", {}) == str(binary)

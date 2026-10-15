@@ -41,6 +41,18 @@ def test_resolve_ngrok_binary_custom_path(tmp_path):
     assert result == str(fake_bin)
 
 
+def test_resolve_downloaded_windows_ngrok_outside_path(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    binary = tmp_path / "bin/ngrok.exe"
+    binary.parent.mkdir()
+    binary.touch()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    monkeypatch.setattr("utils.ngrok.os.access", lambda *args: True)
+    assert resolve_ngrok_binary() == str(binary)
+
+
 def test_save_and_get_ngrok_endpoint(tmp_server_dir):
     assert get_saved_ngrok_endpoint(tmp_server_dir) is None
     save_ngrok_endpoint(tmp_server_dir, "tcp://0.tcp.ngrok.io:12345")

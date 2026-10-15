@@ -250,7 +250,7 @@ install_adoptium_java() {
     local version="$1"
     local java_dir="${TARGET_HOME}/.config/msm/java/${version}"
 
-    if [ -d "${java_dir}" ] && [ -x "${java_dir}/bin/java" ]; then
+    if [ -x "${java_dir}/bin/java" ] || [ -x "${java_dir}/Contents/Home/bin/java" ]; then
         return 0
     fi
 
@@ -284,6 +284,18 @@ install_adoptium_java() {
 setup_all_java_runtimes() {
     if is_termux; then
         run pkg install -y openjdk-25 openjdk-21 openjdk-17 || run pkg install -y openjdk-21 openjdk-17 || run pkg install -y openjdk-17 || true
+        return 0
+    fi
+    if is_freebsd; then
+        priv pkg install -y openjdk21 || priv pkg install -y openjdk17 || {
+            log_warning "Install a compatible OpenJDK package and configure java_homes in MSM."
+        }
+        return 0
+    fi
+    if is_alpine_like; then
+        priv apk add --no-cache openjdk21-jre-headless || priv apk add --no-cache openjdk17-jre-headless || {
+            log_warning "Install a compatible Alpine OpenJDK package and configure java_homes in MSM."
+        }
         return 0
     fi
     install_adoptium_java 17 || true
@@ -476,7 +488,7 @@ main() {
         log_info "Attempting installation with existing system tools..."
     fi
 
-    run_step 3 5 "Setting up Java runtimes (Adoptium 17 & 21)" setup_all_java_runtimes
+    run_step 3 5 "Setting up platform-compatible Java runtimes" setup_all_java_runtimes
     run_step 4 5 "Preparing MSM codebase" prepare_checkout
     run_step 5 5 "Configuring Python virtual environment" configure_python_environment
 

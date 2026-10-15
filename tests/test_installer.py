@@ -189,6 +189,21 @@ def test_alpine_install_uses_apk(tmp_path: Path) -> None:
         "sudo apk add --no-cache git screen python3 py3-pip py3-virtualenv "
         "curl gnupg bash tar"
     ) in result.stdout
+    assert "apk add --no-cache openjdk21-jre-headless" in result.stdout
+    assert "api.adoptium.net" not in result.stdout
+
+
+def test_freebsd_installs_native_java_instead_of_linux_archive(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("pkg", "curl", "git", "python3", "chmod"):
+        _write_stub(fake_bin, command)
+    _write_stub(fake_bin, "id", "printf '1000\\n'\n")
+    _write_stub(fake_bin, "sudo", 'exec "$@"\n')
+    result = _run_installer(tmp_path, fake_bin, {"PREFIX": "", "MSM_DISTRO": "freebsd"})
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "pkg install -y openjdk21" in result.stdout
+    assert "api.adoptium.net" not in result.stdout
 
 
 def test_suse_install_uses_zypper(tmp_path: Path) -> None:

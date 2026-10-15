@@ -140,7 +140,10 @@ def test_get_php_path_skips_incompatible_system_php_and_triggers_auto_install(
     monkeypatch.setattr("shutil.which", lambda cmd: "/usr/bin/php")
     monkeypatch.setattr(
         "utils.system.detect_php_runtime",
-        lambda *args, **kwargs: {"exists": True, "compatible": False},
+        lambda candidate, **kwargs: {
+            "exists": True,
+            "compatible": Path(candidate) == installed_php,
+        },
     )
     monkeypatch.setattr(
         "utils.network.download_php_binary",
@@ -151,6 +154,57 @@ def test_get_php_path_skips_incompatible_system_php_and_triggers_auto_install(
         config={}, server_dir=tmp_path / "empty_srv", auto_install=True
     )
     assert result == str(installed_php)
+
+
+@pytest.mark.parametrize("downloaded", [False, True])
+def test_get_php_path_rejects_incompatible_local_and_downloaded_runtime(
+    tmp_path, monkeypatch, downloaded
+):
+    local = tmp_path / "bin/php7/bin/php"
+    local.parent.mkdir(parents=True)
+    local.touch()
+    monkeypatch.setattr("utils.system.COMMON_PHP_BASES", [])
+    monkeypatch.setattr("utils.system.shutil.which", lambda _: None)
+    monkeypatch.setattr(
+        "utils.system.detect_php_runtime",
+        lambda *a, **kw: {"exists": True, "compatible": False},
+    )
+    monkeypatch.setattr("utils.network.download_php_binary", lambda *a, **kw: local)
+    assert get_php_path({}, tmp_path, auto_install=downloaded) is None
+
+
+@pytest.mark.parametrize(
+    "os_name,arch",
+    [
+        ("freebsd14", "x86_64"),
+        ("Windows", "x86"),
+        ("Windows", "arm64"),
+        ("Linux", "arm64"),
+        ("MacOS", "arm"),
+    ],
+)
+def test_php_download_does_not_fall_back_to_wrong_platform(
+    tmp_path, monkeypatch, os_name, arch
+):
+    session = MagicMock()
+    session.get.return_value.json.return_value = []
+    response = MagicMock()
+    response.json.return_value = [
+        {
+            "assets": [
+                {"name": "PHP-Linux-x86_64.tar.gz"},
+                {"name": "PHP-Android-arm64.tar.gz"},
+                {"name": "PHP-Windows-x64.zip"},
+                {"name": "PHP-MacOS-x64.tar.gz"},
+            ]
+        }
+    ]
+    request = MagicMock(return_value=response)
+    monkeypatch.setattr("utils.network.create_robust_session", lambda: session)
+    monkeypatch.setattr("utils.network.safe_request", request)
+    monkeypatch.setattr("utils.network.get_system_arch_and_os", lambda: (os_name, arch))
+    assert download_php_binary(tmp_path) is None
+    assert request.call_count == 1
 
 
 def test_download_php_binary_matches_android_arm64_asset(

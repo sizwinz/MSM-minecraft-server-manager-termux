@@ -20,11 +20,11 @@ from platforms.capabilities import build_capabilities
 def normalize_architecture(machine_str: str | None = None) -> tuple[Architecture, str]:
     """Normalize system machine/architecture string."""
     raw = (machine_str or platform.machine() or sys.platform).lower().strip()
-    if raw in ("aarch64", "arm64", "armv8", "armv8l", "arm64-v8a"):
+    if raw in ("aarch64", "arm64", "armv8", "arm64-v8a"):
         return Architecture.ARM64, raw
     if raw in ("x86_64", "amd64", "x64", "em64t"):
         return Architecture.X86_64, raw
-    if raw in ("armv7l", "armv7", "armhf", "arm", "armeabi-v7a"):
+    if raw in ("armv7l", "armv7", "armv8l", "armhf", "arm", "armeabi-v7a"):
         return Architecture.ARMV7, raw
     if raw in ("x86", "i386", "i486", "i586", "i686"):
         return Architecture.X86, raw

@@ -15,6 +15,15 @@ def test_extract_last_non_empty_line_returns_last_non_blank_line():
     assert extract_last_non_empty_line("\n alpha \n\n beta \n") == "beta"
 
 
+def test_windows_playit_daemon_receives_isolated_named_pipe():
+    command = build_playit_start_command("playitd.exe", "secret", r"\\.\pipe\msm-test")
+    assert command[-2:] == ["--socket-path", r"\\.\pipe\msm-test"]
+    command = build_playit_claim_generate_command(
+        "playit-cli.exe", r"\\.\pipe\msm-test"
+    )
+    assert command[1:3] == ["--socket-path", r"\\.\pipe\msm-test"]
+
+
 def test_build_playit_claim_generate_command_uses_generate_subcommand():
     assert build_playit_claim_generate_command("playit-cli") == [
         "playit-cli",

@@ -19,6 +19,7 @@ def test_normalize_architecture():
     assert normalize_architecture("aarch64")[0] == Architecture.ARM64
     assert normalize_architecture("arm64")[0] == Architecture.ARM64
     assert normalize_architecture("armv7l")[0] == Architecture.ARMV7
+    assert normalize_architecture("armv8l")[0] == Architecture.ARMV7
     assert normalize_architecture("i686")[0] == Architecture.X86
     assert normalize_architecture("unknown_arch")[0] == Architecture.UNKNOWN
 
@@ -108,3 +109,113 @@ def test_detect_platform_returns_descriptor():
     data = desc.to_dict()
     assert "capabilities" in data
     assert "os_type" in data
+
+
+def test_windows_capabilities_do_not_claim_posix_screen_or_job_objects():
+    caps = build_capabilities(
+        OSType.WINDOWS,
+        EnvironmentVariant.STANDARD,
+        Architecture.X86,
+        is_windows=True,
+        is_macos=False,
+        is_termux=False,
+        is_linux=False,
+        is_freebsd=False,
+        screen_available=True,
+    )
+    assert caps.supports_screen is False
+    assert caps.supports_job_objects is False
+    assert caps.supports_pocketmine_binary is False
+
+
+@pytest.mark.parametrize(
+    "platform_name,system,termux,wsl_version,expected_os,expected_variant,backend",
+    [
+        (
+            "win32",
+            "Windows",
+            False,
+            None,
+            OSType.WINDOWS,
+            EnvironmentVariant.STANDARD,
+            "windows",
+        ),
+        (
+            "darwin",
+            "Darwin",
+            False,
+            None,
+            OSType.MACOS,
+            EnvironmentVariant.STANDARD,
+            "native_posix",
+        ),
+        (
+            "freebsd14",
+            "FreeBSD",
+            False,
+            None,
+            OSType.FREEBSD,
+            EnvironmentVariant.STANDARD,
+            "native_posix",
+        ),
+        (
+            "linux",
+            "Linux",
+            False,
+            None,
+            OSType.LINUX,
+            EnvironmentVariant.STANDARD,
+            "native_posix",
+        ),
+        (
+            "linux",
+            "Linux",
+            False,
+            1,
+            OSType.LINUX,
+            EnvironmentVariant.WSL1,
+            "native_posix",
+        ),
+        (
+            "linux",
+            "Linux",
+            False,
+            2,
+            OSType.LINUX,
+            EnvironmentVariant.WSL2,
+            "native_posix",
+        ),
+        (
+            "linux",
+            "Linux",
+            True,
+            None,
+            OSType.TERMUX,
+            EnvironmentVariant.TERMUX,
+            "native_posix",
+        ),
+    ],
+)
+def test_platform_detection_and_backend_matrix(
+    monkeypatch,
+    platform_name,
+    system,
+    termux,
+    wsl_version,
+    expected_os,
+    expected_variant,
+    backend,
+):
+    monkeypatch.setattr("platforms.detector.sys.platform", platform_name)
+    monkeypatch.setattr("platforms.detector.platform.system", lambda: system)
+    monkeypatch.setattr("platforms.detector.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("platforms.detector.is_running_on_termux", lambda: termux)
+    monkeypatch.setattr(
+        "platforms.detector.detect_wsl", lambda: (wsl_version is not None, wsl_version)
+    )
+    monkeypatch.setattr("platforms.detector.shutil.which", lambda _: None)
+    result = detect_platform()
+    assert result.os_type == expected_os
+    assert result.variant == expected_variant
+    assert result.capabilities.default_backend == backend
+    assert result.capabilities.supported_backends == [backend]

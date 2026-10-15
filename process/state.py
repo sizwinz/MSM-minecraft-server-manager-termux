@@ -71,7 +71,7 @@ class ProcessState:
                 raw = json.load(handle)
             if isinstance(raw, dict) and "pid" in raw:
                 return cls.from_dict(raw)
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
             return None
         return None
 
@@ -91,11 +91,12 @@ class ProcessState:
             except (psutil.Error, OSError):
                 return False
 
-            # Check creation time with tolerance (within 3 seconds)
+            # psutil creation times survive JSON round trips. A broad tolerance
+            # can mistake a quickly recycled PID for the original server.
             if self.create_time > 0:
                 try:
                     proc_create_time = proc.create_time()
-                    if abs(proc_create_time - self.create_time) > 3.0:
+                    if abs(proc_create_time - self.create_time) > 0.01:
                         if logger:
                             logger.log(
                                 "WARNING",
@@ -104,7 +105,7 @@ class ProcessState:
                             )
                         return False
                 except (psutil.Error, OSError):
-                    pass
+                    return False
 
             # Check working directory if accessible
             if self.cwd:
@@ -168,8 +169,8 @@ class ProcessState:
         except psutil.NoSuchProcess:
             return False
         except psutil.AccessDenied:
-            # Process exists but we lack inspection permissions (e.g. other user)
-            return True
+            # Existence alone is insufficient authority to control this PID.
+            return False
         except psutil.Error:
             return False
 

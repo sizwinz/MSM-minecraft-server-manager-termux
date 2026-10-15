@@ -30,7 +30,7 @@ from utils.tunnel_process import record_tunnel, tunnel_state, stop_tunnel_proces
 
 def resolve_ngrok_binary(binary_path: str | None = None) -> str | None:
     candidates = [binary_path] if binary_path else []
-    candidates.extend(["ngrok", "termux-ngrok"])
+    candidates.extend(["ngrok", "termux-ngrok", "ngrok.exe"])
     for candidate in candidates:
         resolved = shutil.which(candidate)
         if resolved:

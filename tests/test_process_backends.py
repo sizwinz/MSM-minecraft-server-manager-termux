@@ -199,3 +199,102 @@ def test_process_manager_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
     screen_b = mgr.get_backend("s2", server_dir, {"process_backend": "screen"})
     assert screen_b.name in ("screen", "native_posix", "windows")
+
+
+def test_invalid_process_identity_never_falls_back_to_legacy_pid(tmp_path):
+    backend = NativePosixBackend("test", tmp_path, tmp_path / "state", tmp_path / "pid")
+    backend.pid_file.write_text(str(os.getpid()))
+    ProcessState(
+        pid=os.getpid(),
+        create_time=psutil.Process().create_time() - 1,
+        cwd=str(Path.cwd()),
+        executable=sys.executable,
+    ).save(backend.state_file)
+    assert backend.read_state() is None
+    backend.state_file.write_text('{"pid": null}')
+    assert backend.read_state() is None
+
+
+def test_windows_never_selects_screen_from_git_path(tmp_path, monkeypatch):
+    monkeypatch.setattr("process.manager.sys.platform", "win32")
+    monkeypatch.setattr("process.manager.shutil.which", lambda _: "screen.exe")
+    backend = ProcessManager().get_backend(
+        "test", tmp_path, {"process_backend": "screen"}
+    )
+    assert backend.name == "windows"
+    assert (
+        ProcessManager()
+        .get_backend("test", tmp_path, {"process_backend": "invalid"})
+        .name
+        == "windows"
+    )
+
+
+@pytest.mark.parametrize("operation", ["terminate", "kill"])
+def test_native_backend_never_signals_an_unowned_process_group(
+    tmp_path, monkeypatch, operation
+):
+    from unittest.mock import MagicMock
+
+    backend = NativePosixBackend("test", tmp_path, tmp_path / "state", tmp_path / "pid")
+    monkeypatch.setattr(backend, "read_state", lambda: ProcessState(pid=12345))
+    monkeypatch.setattr(backend, "is_running", lambda: False)
+    monkeypatch.setattr("process.native_posix.psutil.Process", MagicMock())
+    monkeypatch.setattr(
+        "process.native_posix.os.getpgid", lambda _: 9999, raising=False
+    )
+    kill_group = MagicMock()
+    monkeypatch.setattr("process.native_posix.os.killpg", kill_group, raising=False)
+    if operation == "terminate":
+        backend.terminate(timeout=0)
+    else:
+        backend.kill()
+    kill_group.assert_not_called()
+
+
+def test_native_backend_stops_parent_and_child_in_directory_with_spaces(tmp_path):
+    server_dir = tmp_path / "server with spaces"
+    server_dir.mkdir()
+    backend_class = WindowsBackend if os.name == "nt" else NativePosixBackend
+    backend = backend_class(
+        "tree", server_dir, server_dir / "state", server_dir / "pid"
+    )
+    child_file = server_dir / "child.pid"
+    child = None
+    spec = LaunchSpec(
+        server_name="tree",
+        command=[
+            sys.executable,
+            "-c",
+            "import pathlib, subprocess, sys, time; "
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+            "pathlib.Path('child.pid').write_text(str(child.pid)); time.sleep(60)",
+        ],
+        cwd=server_dir,
+        log_file=server_dir / "logs/latest.log",
+        state_file=backend.state_file,
+        pid_file=backend.pid_file,
+    )
+    try:
+        state = backend.start(spec)
+        deadline = time.monotonic() + 5
+        while not child_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert child_file.exists()
+        child = psutil.Process(int(child_file.read_text()))
+        assert backend.is_running()
+        assert backend.terminate(timeout=5)
+        assert not psutil.pid_exists(state.pid)
+        deadline = time.monotonic() + 5
+        while child.is_running() and time.monotonic() < deadline:
+            if child.status() == psutil.STATUS_ZOMBIE:
+                break
+            time.sleep(0.05)
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+    finally:
+        backend.kill()
+        if child is not None:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass

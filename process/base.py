@@ -96,7 +96,12 @@ class ProcessBackend(ABC):
         if state and state.validate_identity(logger=self.logger):
             return state
 
-        # Fallback to legacy PID file if state file not yet present
+        # Never downgrade an existing identity record to a bare PID: doing so
+        # would accept a recycled PID after the stronger identity check failed.
+        if self.state_file.exists():
+            return None
+
+        # Fallback to legacy PID file only if state file is not yet present.
         if self.pid_file.exists():
             try:
                 pid = int(self.pid_file.read_text(encoding="utf-8").strip())
