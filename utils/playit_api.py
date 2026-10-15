@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -318,10 +319,51 @@ class PlayitApiClient:
             raise PlayitApiError("Playit did not return a session key.")
         return session_key
 
-    def prepare_claim(self, code: str) -> None:
-        self._call(
+    def prepare_claim(self, code: str) -> str:
+        status = self._call(
             "/claim/setup",
             {"code": code, "agent_type": "self-managed", "version": "MSM 6.0"},
+        )
+        if not isinstance(status, str) or status not in {
+            "WaitingForUserVisit",
+            "WaitingForUser",
+            "UserAccepted",
+            "UserRejected",
+        }:
+            raise PlayitApiError("Playit returned an invalid claim status.")
+        return status
+
+    def wait_for_claim(
+        self,
+        code: str,
+        *,
+        timeout: float = 180,
+        poll_interval: float = 1,
+        on_status: Callable[[str], None] | None = None,
+    ) -> str:
+        """Keep the agent claim present while its browser approval is pending."""
+        if timeout <= 0 or poll_interval <= 0:
+            raise ValueError("Claim timeout and polling interval must be positive.")
+        deadline = time.monotonic() + timeout
+        previous_status = None
+        while time.monotonic() < deadline:
+            status = self.prepare_claim(code)
+            if on_status and status != previous_status:
+                on_status(status)
+            previous_status = status
+            if status == "UserRejected":
+                raise PlayitApiError("Agent approval was rejected in the browser.")
+            if status == "UserAccepted":
+                try:
+                    return self.exchange_claim(code)
+                except PlayitApiError as exc:
+                    # Approval can take a moment to reach the exchange endpoint.
+                    if "NotAccepted" not in str(exc):
+                        raise
+            time.sleep(min(poll_interval, max(0, deadline - time.monotonic())))
+        raise PlayitApiError(
+            "Playit linking timed out. Retry setup for a fresh link and keep MSM "
+            "running while approving it in your browser."
         )
 
     def exchange_claim(self, code: str) -> str:

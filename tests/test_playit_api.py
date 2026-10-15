@@ -80,6 +80,73 @@ def test_agent_rundata_uses_agent_secret_auth() -> None:
     assert session.calls[0][3]["Authorization"] == "Agent-Key agent-secret"
 
 
+def test_claim_keeps_polling_setup_until_browser_approval(monkeypatch):
+    monkeypatch.setattr("utils.playit_api.time.sleep", lambda _: None)
+    session = FakeSession(
+        *[
+            FakeResponse({"status": "success", "data": state})
+            for state in ("WaitingForUserVisit", "WaitingForUser", "UserAccepted")
+        ],
+        FakeResponse({"status": "success", "data": {"secret_key": "new-secret"}}),
+    )
+    statuses = []
+    client = PlayitApiClient(session=session)
+    assert client.wait_for_claim("code", on_status=statuses.append) == "new-secret"
+    assert statuses == ["WaitingForUserVisit", "WaitingForUser", "UserAccepted"]
+    assert [call[1].rsplit("/", 1)[1] for call in session.calls] == [
+        "setup",
+        "setup",
+        "setup",
+        "exchange",
+    ]
+    assert session.calls[0][2]["agent_type"] == "self-managed"
+
+
+def test_claim_retries_exchange_after_approval_propagation_delay(monkeypatch):
+    monkeypatch.setattr("utils.playit_api.time.sleep", lambda _: None)
+    session = FakeSession(
+        FakeResponse({"status": "success", "data": "UserAccepted"}),
+        FakeResponse({"status": "fail", "data": "NotAccepted"}),
+        FakeResponse({"status": "success", "data": "UserAccepted"}),
+        FakeResponse({"status": "success", "data": {"secret_key": "new-secret"}}),
+    )
+    assert PlayitApiClient(session=session).wait_for_claim("code") == "new-secret"
+    assert len(session.calls) == 4
+
+
+def test_rejected_claim_does_not_exchange_credentials():
+    session = FakeSession(FakeResponse({"status": "success", "data": "UserRejected"}))
+    with pytest.raises(PlayitApiError, match="rejected"):
+        PlayitApiClient(session=session).wait_for_claim("code")
+    assert len(session.calls) == 1
+
+
+def test_unapproved_claim_expires_without_real_waits(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("utils.playit_api.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "utils.playit_api.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    session = FakeSession(
+        *[
+            FakeResponse({"status": "success", "data": "WaitingForUserVisit"})
+            for _ in range(3)
+        ]
+    )
+    with pytest.raises(PlayitApiError, match="timed out"):
+        PlayitApiClient(session=session).wait_for_claim("code", timeout=3)
+    assert len(session.calls) == 3
+    assert all(call[1].endswith("/claim/setup") for call in session.calls)
+
+
+@pytest.mark.parametrize("state", [None, {}, "unexpected"])
+def test_claim_rejects_invalid_setup_response(state):
+    session = FakeSession(FakeResponse({"status": "success", "data": state}))
+    with pytest.raises(PlayitApiError, match="invalid claim status"):
+        PlayitApiClient(session=session).wait_for_claim("code")
+
+
 def test_build_tunnel_create_request_for_java_tcp() -> None:
     request = build_tunnel_create_request(
         server_name="survival",

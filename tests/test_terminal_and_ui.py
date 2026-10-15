@@ -11,6 +11,66 @@ from ui.colors import ColorScheme
 from utils.logging_utils import EnhancedLogger
 
 
+def test_playit_wizard_polls_without_blocking_for_terminal_input(
+    tmp_path, monkeypatch, capsys
+):
+    from unittest.mock import MagicMock
+    from ui import cli
+
+    instance = MagicMock()
+    instance.playit_secret_file = tmp_path / ".msm.playit.secret"
+    instance.playit_endpoint_file = tmp_path / ".msm.playit.endpoint"
+    runtime = MagicMock()
+    runtime.get_instance.return_value = instance
+    config = MagicMock()
+    config.load.return_value = {"servers": {"test": {"tunnel": {}}}}
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.wait_for_claim.return_value = "new-agent-secret"
+    monkeypatch.setattr(cli, "PlayitApiClient", lambda **kwargs: client)
+    monkeypatch.setattr(cli, "resolve_playit_binary", lambda _: "playitd")
+    monkeypatch.setattr(cli, "configure_playit_api_tunnel", lambda *args: True)
+    save_config = MagicMock()
+    monkeypatch.setattr(cli, "save_tunnel_config", save_config)
+    monkeypatch.setattr(cli, "pause", lambda: None)
+
+    def unexpected_input(*args):
+        pytest.fail(
+            "New-agent claiming must poll while the browser is open, not wait on input"
+        )
+
+    monkeypatch.setattr("builtins.input", unexpected_input)
+    cli.playit_setup_wizard(runtime, config, "test", MagicMock())
+    client.wait_for_claim.assert_called_once()
+    client.prepare_claim.assert_not_called()
+    assert instance.playit_secret_file.read_text() == "new-agent-secret"
+    assert "Keep MSM running" in capsys.readouterr().out
+    save_config.assert_called_once()
+
+
+def test_cancelled_playit_relink_preserves_existing_credentials(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from ui import cli
+
+    instance = MagicMock()
+    instance.playit_secret_file = tmp_path / ".msm.playit.secret"
+    instance.playit_secret_file.write_text("existing-agent-secret")
+    runtime = MagicMock()
+    runtime.get_instance.return_value = instance
+    config = MagicMock()
+    config.load.return_value = {"servers": {"test": {"tunnel": {}}}}
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.wait_for_claim.side_effect = KeyboardInterrupt
+    monkeypatch.setattr(cli, "PlayitApiClient", lambda **kwargs: client)
+    monkeypatch.setattr(cli, "resolve_playit_binary", lambda _: "playitd")
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    cli.playit_setup_wizard(runtime, config, "test", MagicMock())
+    assert instance.playit_secret_file.read_text() == "existing-agent-secret"
+    instance.stop_tunnel.assert_not_called()
+    config.mutate.assert_not_called()
+
+
 def test_colors_no_color_support(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NO_COLOR", "1")
     scheme = ColorScheme()

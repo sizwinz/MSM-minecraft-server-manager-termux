@@ -471,28 +471,26 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
         code = secrets.token_hex(5)
         try:
             with PlayitApiClient(timeout=5) as client:
-                client.prepare_claim(code)
-                print(f"Open https://playit.gg/claim/{code} and approve this agent.")
-                if (
-                    input("Press Enter after approval, or 's' to cancel: ")
-                    .strip()
-                    .lower()
-                    == "s"
-                ):
-                    return
-                deadline = time.monotonic() + 45
-                while time.monotonic() < deadline:
-                    try:
-                        secret = client.exchange_claim(code)
-                        break
-                    except PlayitApiError as exc:
-                        if "NotAccepted" not in str(exc):
-                            raise
-                        time.sleep(1)
-                if not secret:
-                    raise PlayitApiError(
-                        "Approval is still pending; retry setup after approving the agent."
-                    )
+                print(
+                    f"Open https://playit.gg/claim/{code} and approve this agent.",
+                    flush=True,
+                )
+                print(
+                    "Waiting for browser approval (up to 3 minutes). "
+                    "Keep MSM running; Ctrl+C cancels.",
+                    flush=True,
+                )
+
+                def show_claim_status(status):
+                    if status == "WaitingForUser":
+                        logger.log(
+                            "INFO",
+                            "Browser detected; approve the agent on the Playit page.",
+                        )
+                    elif status == "UserAccepted":
+                        logger.log("INFO", "Agent approved; finishing linking.")
+
+                secret = client.wait_for_claim(code, on_status=show_claim_status)
             instance.stop_tunnel()
             save_playit_secret(instance.playit_secret_file, secret)
             remove_file(instance.playit_endpoint_file)
@@ -501,6 +499,11 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
                 saved["servers"][current_server]["tunnel"]["playit_tunnel_id"] = None
 
             config_manager.mutate(reset)
+        except KeyboardInterrupt:
+            logger.log(
+                "INFO", "Playit linking cancelled; existing credentials were kept."
+            )
+            return
         except PlayitApiError as exc:
             logger.log("ERROR", f"Playit linking failed: {exc}")
             pause()
