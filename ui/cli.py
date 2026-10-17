@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
+
 from core.config import ConfigManager
 from core.constants import (
     DEFAULT_TUNNEL_BINARIES,
@@ -25,7 +27,7 @@ from core.constants import (
 )
 from core.runtime import RuntimeManager
 from db.manager import DatabaseManager
-from ui.colors import C
+from ui.colors import C, visible_len
 from utils.logging_utils import EnhancedLogger
 from utils.network import download_ngrok_binary, get_versions_for_flavor
 from utils.ngrok import diagnose_ngrok, resolve_ngrok_binary
@@ -42,7 +44,11 @@ from utils.playit_api import (
 from utils.properties import load_properties
 from utils.system import (
     check_base_dependencies,
+    detect_java_version,
+    detect_php_runtime,
     format_bytes,
+    get_java_path,
+    get_required_java,
     get_server_dir,
     get_system_info,
     remove_file,
@@ -52,9 +58,39 @@ from utils.system import (
     write_text_file,
 )
 
+_FLASH_MESSAGE: tuple[str, str, str] | None = None
 
-def pause() -> None:
-    input("\nPress Enter to continue...")
+
+def set_flash(glyph: str, color: str, text: str) -> None:
+    """Store a non-blocking flash message to display on the next render pass."""
+    global _FLASH_MESSAGE
+    _FLASH_MESSAGE = (glyph, color, text)
+
+
+def render_flash() -> str:
+    """Return formatted flash banner and clear stored message."""
+    global _FLASH_MESSAGE
+    if not _FLASH_MESSAGE:
+        return ""
+    glyph, color, text = _FLASH_MESSAGE
+    _FLASH_MESSAGE = None
+    return f" {color}{glyph} {text}{C.RESET}\n"
+
+
+def prompt(label: str = "› ", default: str | None = None) -> str:
+    """Prompt user with EOF and KeyboardInterrupt safety."""
+    try:
+        val = input(label).strip()
+        return val if val else (default or "")
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def pause(prompt_text: str = "\nPress Enter to continue...") -> None:
+    try:
+        input(prompt_text)
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def clear_screen() -> None:
@@ -77,7 +113,7 @@ def run_with_spinner(message: str, func, *args, **kwargs):
     def worker() -> None:
         try:
             state["result"] = func(*args, **kwargs)
-        except Exception as exc:  # pragma: no cover - presentation glue
+        except Exception as exc:
             state["error"] = exc
         finally:
             state["done"] = True
@@ -85,11 +121,11 @@ def run_with_spinner(message: str, func, *args, **kwargs):
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
 
-    spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    spinner = ["◐", "◓", "◑", "◒"]
     index = 0
     while not state["done"]:
         print(
-            f"\r {C.PRIMARY}{spinner[index % len(spinner)]}{C.RESET} {message}",
+            f"\r {C.ACCENT}{spinner[index % len(spinner)]}{C.RESET} {message}",
             end="",
             flush=True,
         )
@@ -103,10 +139,10 @@ def run_with_spinner(message: str, func, *args, **kwargs):
 
 
 def get_terminal_width(
-    default: int = 60, min_width: int = 36, max_width: int = 72
+    default: int = 48, min_width: int = 42, max_width: int = 64
 ) -> int:
     cols = shutil.get_terminal_size((default, 24)).columns
-    return max(min_width, min(cols, max_width))
+    return max(min_width, min(cols - 2, max_width))
 
 
 def create_services():
@@ -129,10 +165,131 @@ def ensure_current_server(config_manager: ConfigManager) -> dict:
     return config
 
 
+def render_server_hud(
+    current_server: str,
+    runtime: RuntimeManager,
+    config_manager: ConfigManager,
+) -> None:
+    width = get_terminal_width()
+    config = config_manager.load()
+    server_config = config.get("servers", {}).get(current_server, {})
+    instance = runtime.get_instance(current_server)
+    flavor = server_config.get("server_flavor") or "vanilla"
+    flavor_name = SERVER_FLAVORS.get(flavor, {}).get("name", flavor)
+    version = server_config.get("server_version") or "N/A"
+    is_running = instance.is_running()
+    pid = instance.current_pid() if is_running else None
+
+    # Line 1: Header banner
+    tag = f"MSM {C.BOX_H}{C.BOX_H} {current_server} [{flavor_name} {version}] "
+    pad = max(2, width - visible_len(tag))
+    print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+
+    # Line 2: Telemetry
+    allocated_mb = int(server_config.get("ram_mb", 2048))
+    allocated_g = allocated_mb / 1024.0
+    if is_running and pid:
+        cpu_str = "--%"
+        ram_str = f"--/{allocated_g:.1f}G"
+        try:
+            proc = psutil.Process(pid)
+            cpu_val = proc.cpu_percent(interval=None)
+            if cpu_val is not None:
+                cpu_str = f"{cpu_val:.0f}%"
+            rss_bytes = proc.memory_info().rss
+            rss_g = rss_bytes / (1024 * 1024 * 1024)
+            ram_str = f"{rss_g:.1f}/{allocated_g:.1f}G"
+        except (psutil.Error, OSError, PermissionError):
+            pass
+        status_dot = f"{C.OK}{C.DOT_ON} ONLINE{C.RESET}"
+        pid_str = f"{C.DIM}(PID {pid}){C.RESET}"
+        print(
+            f"{status_dot} {pid_str} {C.DIM}{C.BOX_V}{C.RESET} "
+            f"CPU {cpu_str} {C.DIM}{C.BOX_V}{C.RESET} RAM {ram_str}"
+        )
+    else:
+        status_dot = f"{C.ERR}{C.DOT_OFF} OFFLINE{C.RESET}"
+        print(
+            f"{status_dot} {C.DIM}{C.BOX_V}{C.RESET} "
+            f"CPU --% {C.DIM}{C.BOX_V}{C.RESET} RAM --/{allocated_g:.1f}G"
+        )
+
+    # Line 3: Bind & RCON
+    port = instance.get_server_port()
+    rcon_cfg = server_config.get("rcon", {})
+    rcon_state = "enabled" if rcon_cfg.get("enabled") else "disabled"
+    print(
+        f"{C.DIM}{C.TREE_BRANCH}{C.RESET} Bind:   127.0.0.1:{port} "
+        f"{C.DIM}·{C.RESET} RCON: {rcon_state}"
+    )
+
+    # Line 4: Tunnel
+    conn = instance.get_connection_info()
+    tunnel_prov = conn.get("tunnel_provider", "playit")
+    tunnel_url = conn.get("tunnel_url")
+    tunnel_enabled = conn.get("tunnel_enabled", False)
+    if tunnel_url:
+        tunnel_display = f"{tunnel_prov} -> {tunnel_url}"
+    elif tunnel_enabled:
+        tunnel_display = f"{tunnel_prov} ({conn.get('tunnel_status', 'active')})"
+    else:
+        tunnel_display = f"{tunnel_prov} (disabled)"
+
+    max_tun_len = width - 12
+    if len(tunnel_display) > max_tun_len and max_tun_len > 10:
+        tunnel_display = tunnel_display[: max_tun_len - 3] + "..."
+    print(f"{C.DIM}{C.TREE_CORNER}{C.RESET} Tunnel: {tunnel_display}")
+
+
+def render_workspace_overview(
+    runtime: RuntimeManager,
+    config_manager: ConfigManager,
+) -> None:
+    width = get_terminal_width()
+    config = config_manager.load()
+    servers = list(config.get("servers", {}))
+    from platforms.detector import detect_platform
+    from platforms.paths import get_path_service
+
+    platform_desc = detect_platform()
+    path_service = get_path_service()
+
+    java_bin = shutil.which("java")
+    java_ver = detect_java_version(java_bin) if java_bin else "None"
+    php_bin = shutil.which("php")
+    php_info = detect_php_runtime(php_bin) if php_bin else {}
+    php_ver = php_info.get("version") or "None"
+
+    tag = f"MSM {C.BOX_H}{C.BOX_H} Workspace Overview "
+    pad = max(2, width - visible_len(tag))
+    print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+    print(
+        f"Host: {platform_desc.os_type.value} {platform_desc.architecture.value} "
+        f"{C.DIM}{C.BOX_V}{C.RESET} Java: {java_ver} {C.DIM}{C.BOX_V}{C.RESET} PHP: {php_ver}"
+    )
+    print(f"Configured Servers ({len(servers)}):")
+    for idx, s_name in enumerate(servers, start=1):
+        s_cfg = config.get("servers", {}).get(s_name, {})
+        s_flavor = s_cfg.get("server_flavor") or "N/A"
+        s_ver = s_cfg.get("server_version") or "N/A"
+        s_port = s_cfg.get("server_settings", {}).get("port", 25565)
+        inst = runtime.get_instance(s_name)
+        dot = (
+            f"{C.OK}{C.DOT_ON}{C.RESET}"
+            if inst.is_running()
+            else f"{C.ERR}{C.DOT_OFF}{C.RESET}"
+        )
+        s_dir = path_service.resolve_server_dir(s_name, config)
+        print(
+            f" [{idx}] {dot} {C.BOLD}{s_name}{C.RESET}  {s_flavor} {s_ver}  :{s_port}"
+        )
+        print(f"     {C.DIM}Directory: {s_dir}{C.RESET}")
+
+
 def print_header(current_server: str | None, runtime: RuntimeManager) -> None:
     clear_screen()
     width = get_terminal_width()
-    divider = f"{C.PRIMARY}{C.BOX_H * width}{C.RESET}"
+    divider = f"{C.DIM}{C.BOX_H * width}{C.RESET}"
 
     system_info = get_system_info()
     running_servers = runtime.running_servers()
@@ -147,8 +304,8 @@ def print_header(current_server: str | None, runtime: RuntimeManager) -> None:
     )
 
     print(
-        f"{C.BOLD}{C.PRIMARY}  MSM{C.RESET} "
-        f"{C.DIM}• Minecraft Server Manager v{VERSION}{C.RESET}"
+        f"{C.BOLD}{C.ACCENT}  MSM{C.RESET} "
+        f"{C.DIM}· Minecraft Server Manager v{VERSION}{C.RESET}"
     )
     print(divider)
     print(f"  {C.DIM}RAM     :{C.RESET} {ram_usage}")
@@ -258,8 +415,6 @@ def configure_playit_api_tunnel(
                 local_port=local_port,
                 existing_tunnel_id=tunnel.get("playit_tunnel_id"),
             )
-            # A freshly claimed agent must register its real version through the
-            # running daemon before Playit will allow a mapping to be created.
             for attempt in range(5):
                 try:
                     tunnel_id, endpoint = client.create_or_update_tunnel(**request)
@@ -346,7 +501,7 @@ def tunnel_diagnostics_screen(
         return
 
     for check in checks:
-        symbol = f"{C.GREEN}✓{C.RESET}" if check.ok else f"{C.RED}✗{C.RESET}"
+        symbol = f"{C.OK}[OK]{C.RESET}" if check.ok else f"{C.ERR}[ERR]{C.RESET}"
         print(f"  {symbol} {check.name}: {check.detail}")
     pause()
 
@@ -385,8 +540,8 @@ def ngrok_setup_wizard(
             "WARNING",
             "Ngrok binary was not found on this device.",
         )
-        prompt = "Download and install ngrok automatically? (Y/n): "
-        if input(prompt).strip().lower() != "n":
+        prompt_txt = "Download and install ngrok automatically? (Y/n): "
+        if prompt(prompt_txt, default="y").lower() != "n":
             logger.log("INFO", "Downloading ngrok...")
             downloaded_path = download_ngrok_binary(logger=logger)
             if downloaded_path:
@@ -396,14 +551,20 @@ def ngrok_setup_wizard(
             else:
                 logger.log("ERROR", "Auto-installation failed.")
         else:
-            custom_input = input("Enter custom ngrok binary path: ").strip()
+            custom_input = prompt("Enter custom ngrok binary path: ")
             if custom_input:
                 resolved_binary = resolve_ngrok_binary(custom_input)
                 binary_path = resolved_binary or custom_input
 
     from getpass import getpass
 
-    authtoken = getpass("\nNgrok authtoken (press Enter to keep existing): ").strip()
+    try:
+        authtoken = getpass(
+            "\nNgrok authtoken (press Enter to keep existing): "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        authtoken = ""
+
     if authtoken and resolved_binary:
         result = run_command(
             [resolved_binary, "config", "add-authtoken", authtoken],
@@ -445,7 +606,10 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
     )
     resolved = resolve_playit_binary(candidate)
     if not resolved and running_on_termux():
-        if input("Install Playit with Termux pkg? (Y/n): ").strip().lower() != "n":
+        if (
+            prompt("Install Playit with Termux pkg? (Y/n): ", default="y").lower()
+            != "n"
+        ):
             for command in (
                 ["pkg", "install", "-y", "tur-repo"],
                 ["pkg", "install", "-y", "playit"],
@@ -459,7 +623,7 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
                     return
             resolved = resolve_playit_binary()
     if not resolved:
-        custom = input("Playit daemon executable path: ").strip()
+        custom = prompt("Playit daemon executable path: ")
         resolved = resolve_playit_binary(custom) if custom else None
     if not resolved:
         logger.log(
@@ -481,9 +645,9 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
             secret = None
         else:
             if (
-                input("Link a fresh agent instead of the existing one? (y/N): ")
-                .strip()
-                .lower()
+                prompt(
+                    "Link a fresh agent instead of existing? (y/N): ", default="n"
+                ).lower()
                 == "y"
             ):
                 secret = None
@@ -528,8 +692,7 @@ def playit_setup_wizard(runtime, config_manager, current_server, logger) -> None
             logger.log("ERROR", f"Playit linking failed: {exc}")
             pause()
             return
-    # Start the daemon first so it can register its protocol version. The claim
-    # API only links credentials; it does not bring the agent online.
+
     save_tunnel_config(
         instance,
         config_manager,
@@ -583,16 +746,15 @@ def configure_tunnel_advanced(
         print(f" [ 5] Binary Path : {tunnel.get('binary_path', 'default')}")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose setting [0-5]: {C.RESET}").strip()
+        choice = prompt(f"\n{C.BOLD}Choose setting [0-5]: {C.RESET}")
         if choice == "0":
             return
         if choice == "1":
             print(f"\nSupported Providers: {', '.join(SUPPORTED_TUNNEL_PROVIDERS)}")
-            val = (
-                input(f"Provider [{tunnel.get('provider', 'playit')}]: ")
-                .strip()
-                .lower()
-            )
+            val = prompt(
+                f"Provider [{tunnel.get('provider', 'playit')}]: ",
+                default=tunnel.get("provider", "playit"),
+            ).lower()
             if val in SUPPORTED_TUNNEL_PROVIDERS:
 
                 def update_prov(s: dict) -> None:
@@ -604,7 +766,7 @@ def configure_tunnel_advanced(
                 logger.log("ERROR", "Unsupported provider.")
             pause()
         elif choice == "2":
-            val = input("Protocol (tcp/udp) [tcp]: ").strip().lower() or "tcp"
+            val = prompt("Protocol (tcp/udp) [tcp]: ", default="tcp").lower()
             if val in SUPPORTED_TUNNEL_PROTOCOLS:
 
                 def update_prot(s: dict) -> None:
@@ -616,7 +778,7 @@ def configure_tunnel_advanced(
                 logger.log("ERROR", "Unsupported protocol.")
             pause()
         elif choice == "3":
-            val = input("Local host [127.0.0.1]: ").strip() or "127.0.0.1"
+            val = prompt("Local host [127.0.0.1]: ", default="127.0.0.1")
 
             def update_host(s: dict) -> None:
                 s["servers"][current_server]["tunnel"]["local_host"] = val
@@ -625,7 +787,7 @@ def configure_tunnel_advanced(
             logger.log("SUCCESS", f"Local host set to {val}.")
             pause()
         elif choice == "4":
-            raw = input("Local port (number or 'auto') [auto]: ").strip()
+            raw = prompt("Local port (number or 'auto') [auto]: ")
             val = int(raw) if raw.isdigit() else None
 
             def update_port(s: dict) -> None:
@@ -635,7 +797,7 @@ def configure_tunnel_advanced(
             logger.log("SUCCESS", "Local port updated.")
             pause()
         elif choice == "5":
-            val = input("Binary path (leave empty for default): ").strip()
+            val = prompt("Binary path (leave empty for default): ")
             if val:
 
                 def update_bin(s: dict) -> None:
@@ -655,85 +817,42 @@ def tunnel_manager_menu(
     instance = runtime.get_instance(current_server)
 
     while True:
+        clear_screen()
         config = config_manager.load()
         server_config = config["servers"][current_server]
         tunnel = server_config.setdefault("tunnel", {})
         provider = tunnel.get("provider", "playit")
         enabled = tunnel.get("enabled", False)
         status_text = (
-            f"{C.GREEN}{C.DOT_ON} Enabled ({provider}){C.RESET}"
+            f"{C.OK}{C.DOT_ON} Enabled ({provider}){C.RESET}"
             if enabled
             else f"{C.DIM}{C.DOT_OFF} Disabled{C.RESET}"
         )
 
-        print_header(current_server, runtime)
-        print(f" {C.BOLD}Public Tunnel & Remote Access:{C.RESET} {current_server}\n")
-        print(f"  {C.DIM}Tunnel Status:{C.RESET} {status_text}")
+        width = get_terminal_width()
+        tag = f"MSM {C.BOX_H}{C.BOX_H} Tunnels: {current_server} "
+        pad = max(2, width - visible_len(tag))
+        print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+        print(f" Status   : {status_text}")
         print_connection_summary(instance)
-        print()
+        print(f"{C.DIM}{C.BOX_H * width}{C.RESET}")
 
-        print(" [ 1] Start / Restart Tunnel")
-        print(" [ 2] Stop Tunnel")
-        print(" [ 3] Setup Playit.gg (Recommended - Free & Fast)")
-        print(" [ 4] Setup Ngrok")
-        print(" [ 5] Test & Diagnose Tunnel Health")
-        print(" [ 6] Advanced Tunnel Settings (Host, Port, Protocol, Binary)")
-        print(" [ 7] Reset / Re-link Agent (Delete Stored Secrets)")
-        if enabled:
-            print(" [ 8] Disable Tunnel")
-        else:
-            print(" [ 8] Enable Tunnel")
-        print(" [ 0] Back")
+        flash = render_flash()
+        if flash:
+            print(flash, end="")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-8]: {C.RESET}").strip()
-        if choice == "0":
+        print(" [1] Toggle Tunnel (Start/Stop)")
+        print(" [2] Setup Playit.gg (Recommended - Free & Fast)")
+        print(" [3] Setup Ngrok")
+        print(" [4] Test & Diagnose Tunnel Health")
+        print(" [5] Advanced Tunnel Settings")
+        print(" [6] Reset / Re-link Agent (Delete Stored Secrets)")
+        print(" [0] Back")
+
+        choice = prompt(f"\n{C.ACCENT}{C.POINTER}{C.RESET} ")
+        if choice in ("0", "b", "q", "back", "exit"):
             return
         if choice == "1":
-            instance.restart_tunnel()
-            pause()
-            continue
-        if choice == "2":
-            instance.stop_tunnel()
-            logger.log("SUCCESS", f"Stopped tunnel for {current_server}.")
-            pause()
-            continue
-        if choice == "3":
-            playit_setup_wizard(runtime, config_manager, current_server, logger)
-            continue
-        if choice == "4":
-            ngrok_setup_wizard(runtime, config_manager, current_server, logger)
-            continue
-        if choice == "5":
-            tunnel_diagnostics_screen(
-                runtime, config_manager, current_server, logger, provider=provider
-            )
-            continue
-        if choice == "6":
-            configure_tunnel_advanced(runtime, config_manager, current_server, logger)
-            continue
-        if choice == "7":
-            confirm = (
-                input(
-                    f"\n{C.YELLOW}Reset tunnel agent and delete saved "
-                    f"credentials for {current_server}? (y/N): {C.RESET}"
-                )
-                .strip()
-                .lower()
-            )
-            if confirm == "y":
-                instance.stop_tunnel()
-                remove_file(instance.playit_secret_file)
-                remove_file(instance.playit_endpoint_file)
-                remove_file(instance.server_dir / ".msm.ngrok.endpoint")
-                remove_file(instance.server_dir / ".msm.playit.log")
-                remove_file(instance.server_dir / ".msm.ngrok.log")
-                logger.log(
-                    "SUCCESS",
-                    f"Reset tunnel credentials and state for {current_server}.",
-                )
-            pause()
-            continue
-        if choice == "8":
             binary_path = tunnel.get(
                 "binary_path",
                 DEFAULT_TUNNEL_BINARIES.get(provider, "playit"),
@@ -747,10 +866,37 @@ def tunnel_manager_menu(
                 enabled=not enabled,
                 logger=logger,
             )
-            pause()
+            action_text = "Enabled" if not enabled else "Disabled"
+            set_flash("[OK]", C.OK, f"Tunnel {action_text}.")
             continue
-        logger.log("ERROR", "Invalid tunnel manager selection.")
-        pause()
+        if choice == "2":
+            playit_setup_wizard(runtime, config_manager, current_server, logger)
+            continue
+        if choice == "3":
+            ngrok_setup_wizard(runtime, config_manager, current_server, logger)
+            continue
+        if choice == "4":
+            tunnel_diagnostics_screen(
+                runtime, config_manager, current_server, logger, provider=provider
+            )
+            continue
+        if choice == "5":
+            configure_tunnel_advanced(runtime, config_manager, current_server, logger)
+            continue
+        if choice == "6":
+            confirm = prompt(
+                "\nReset tunnel agent and delete saved credentials? (y/N): ",
+                default="n",
+            ).lower()
+            if confirm == "y":
+                instance.stop_tunnel()
+                remove_file(instance.playit_secret_file)
+                remove_file(instance.playit_endpoint_file)
+                remove_file(instance.server_dir / ".msm.ngrok.endpoint")
+                remove_file(instance.server_dir / ".msm.playit.log")
+                remove_file(instance.server_dir / ".msm.ngrok.log")
+                set_flash("[OK]", C.OK, "Tunnel credentials cleared.")
+            continue
 
 
 def tunnel_setup_wizard(
@@ -762,12 +908,226 @@ def tunnel_setup_wizard(
     tunnel_manager_menu(runtime, config_manager, current_server, logger)
 
 
+def quick_property_editor(
+    instance,
+    config_manager: ConfigManager,
+    current_server: str,
+    logger,
+) -> None:
+    """Inline quick property editor for the top 8 server.properties keys."""
+    properties_path = instance.server_dir / SERVER_PROPERTIES_FILE
+    difficulty_levels = ["peaceful", "easy", "normal", "hard"]
+    gamemodes = ["survival", "creative", "adventure", "spectator"]
+
+    while True:
+        clear_screen()
+        width = get_terminal_width()
+        tag = f"MSM {C.BOX_H}{C.BOX_H} Properties: {current_server} "
+        pad = max(2, width - visible_len(tag))
+        print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+
+        flash = render_flash()
+        if flash:
+            print(flash, end="")
+
+        props = load_properties(properties_path)
+
+        online_mode = props.get("online-mode", "true")
+        pvp = props.get("pvp", "true")
+        difficulty = props.get("difficulty", "normal")
+        gamemode = props.get("gamemode", "survival")
+        whitelist = props.get("white-list", "false")
+        max_players = props.get("max-players", "20")
+        view_distance = props.get("view-distance", "10")
+        motd = props.get("motd", "A Minecraft Server")
+
+        print(f" [1] online-mode   : {online_mode}")
+        print(f" [2] pvp           : {pvp}")
+        print(f" [3] difficulty    : {difficulty}")
+        print(f" [4] gamemode      : {gamemode}")
+        print(f" [5] white-list    : {whitelist}")
+        print(f" [6] max-players   : {max_players}")
+        print(f" [7] view-distance : {view_distance}")
+        print(f" [8] motd          : {motd}")
+        print(f"{C.DIM}{C.BOX_H * width}{C.RESET}")
+        print(" [1-8] Toggle/Edit   [c] Custom key=val   [0] Back")
+
+        choice = prompt(f"\n{C.ACCENT}{C.POINTER}{C.RESET} ").lower()
+        if choice in ("0", "b", "q", "back", "exit"):
+            return
+        elif choice == "1":
+            new_val = "false" if online_mode.lower() == "true" else "true"
+            props["online-mode"] = new_val
+            instance.save_server_properties(props)
+            set_flash("[OK]", C.OK, f"online-mode set to {new_val}")
+        elif choice == "2":
+            new_val = "false" if pvp.lower() == "true" else "true"
+            props["pvp"] = new_val
+            instance.save_server_properties(props)
+            set_flash("[OK]", C.OK, f"pvp set to {new_val}")
+        elif choice == "3":
+            diff_cur = difficulty.lower()
+            idx = (
+                difficulty_levels.index(diff_cur)
+                if diff_cur in difficulty_levels
+                else 0
+            )
+            new_val = difficulty_levels[(idx + 1) % len(difficulty_levels)]
+            props["difficulty"] = new_val
+            instance.save_server_properties(props)
+            set_flash("[OK]", C.OK, f"difficulty set to {new_val}")
+        elif choice == "4":
+            gm_cur = gamemode.lower()
+            idx = gamemodes.index(gm_cur) if gm_cur in gamemodes else 0
+            new_val = gamemodes[(idx + 1) % len(gamemodes)]
+            props["gamemode"] = new_val
+            instance.save_server_properties(props)
+            set_flash("[OK]", C.OK, f"gamemode set to {new_val}")
+        elif choice == "5":
+            new_val = "false" if whitelist.lower() == "true" else "true"
+            props["white-list"] = new_val
+            instance.save_server_properties(props)
+            set_flash("[OK]", C.OK, f"white-list set to {new_val}")
+        elif choice == "6":
+            raw = prompt(f"max-players [{max_players}]: ")
+            if raw.isdigit():
+                props["max-players"] = raw
+                instance.save_server_properties(props)
+                set_flash("[OK]", C.OK, f"max-players set to {raw}")
+        elif choice == "7":
+            raw = prompt(f"view-distance [{view_distance}]: ")
+            if raw.isdigit():
+                props["view-distance"] = raw
+                instance.save_server_properties(props)
+                set_flash("[OK]", C.OK, f"view-distance set to {raw}")
+        elif choice == "8":
+            raw = prompt(f"motd [{motd}]: ")
+            if raw:
+                props["motd"] = raw
+                instance.save_server_properties(props)
+                set_flash("[OK]", C.OK, "motd updated")
+        elif choice == "c":
+            pair = prompt("Enter key=value: ")
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if k:
+                    props[k] = v
+                    instance.save_server_properties(props)
+                    set_flash("[OK]", C.OK, f"{k} set to {v}")
+
+
+def server_creation_wizard(
+    runtime: RuntimeManager,
+    config_manager: ConfigManager,
+    logger,
+) -> str | None:
+    """Step-by-step inline server creation wizard with bracketed smart defaults."""
+    width = get_terminal_width()
+    tag = f"MSM {C.BOX_H}{C.BOX_H} Create New Server "
+    pad = max(2, width - visible_len(tag))
+    print(f"\n{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+
+    cfg_data = config_manager.load()
+    default_name = f"server-{len(cfg_data.get('servers', {})) + 1}"
+    raw_name = prompt(f"Server name [{default_name}]: ", default=default_name)
+    sanitized = sanitize_input(raw_name) if raw_name else default_name
+    if not sanitized:
+        logger.log("ERROR", "Invalid server name.")
+        pause()
+        return None
+
+    if sanitized in cfg_data.get("servers", {}):
+        logger.log("ERROR", f"Server '{sanitized}' already exists.")
+        pause()
+        return None
+
+    flavors = list(SERVER_FLAVORS.keys())
+    print("\nSupported server flavors:")
+    for idx, flav in enumerate(flavors, start=1):
+        print(f" [{idx}] {flav} - {SERVER_FLAVORS[flav]['name']}")
+    flav_choice = prompt("Choose flavor [1: paper]: ", default="1")
+    f_idx = (
+        int(flav_choice) - 1
+        if flav_choice.isdigit() and 1 <= int(flav_choice) <= len(flavors)
+        else 0
+    )
+    flavor = flavors[f_idx]
+
+    # Version resolution
+    versions_data = get_versions_for_flavor(flavor, logger=logger)
+    release_versions = [
+        v for v, info in versions_data.items() if not info.get("is_snapshot")
+    ]
+    default_version = (
+        release_versions[0]
+        if release_versions
+        else (next(iter(versions_data)) if versions_data else "1.21.1")
+    )
+    version = prompt(f"Version [{default_version}]: ", default=default_version)
+    version_info = versions_data.get(version, {})
+
+    # RAM allocation
+    raw_ram = prompt("RAM allocation in MB [2048]: ", default="2048")
+    ram_mb = int(raw_ram) if raw_ram.isdigit() else 2048
+
+    # Port binding
+    default_port = SERVER_FLAVORS[flavor].get("default_port", 25565)
+    raw_port = prompt(f"Server port [{default_port}]: ", default=str(default_port))
+    port = int(raw_port) if raw_port.isdigit() else default_port
+
+    # Pre-flight runtime check
+    if flavor == "pocketmine":
+        php_bin = shutil.which("php")
+        php_info = detect_php_runtime(php_bin) if php_bin else {}
+        if not php_info.get("compatible"):
+            print(f"{C.WARN}[WARN] PocketMine requires PHP with ZTS support.{C.RESET}")
+    else:
+        req_java = get_required_java(version)
+        java_path = get_java_path(req_java)
+        if not java_path:
+            print(
+                f"{C.WARN}[WARN] Java {req_java} required for Minecraft {version} "
+                f"was not detected.{C.RESET}"
+            )
+
+    config_manager.ensure_server(sanitized)
+    instance = runtime.get_instance(sanitized)
+    instance.server_dir.mkdir(parents=True, exist_ok=True)
+
+    def updater(s_cfg: dict) -> None:
+        target = s_cfg["servers"][sanitized]
+        target["server_flavor"] = flavor
+        target["server_version"] = version
+        target["ram_mb"] = ram_mb
+        target["server_settings"]["port"] = port
+
+    config_manager.mutate(updater)
+
+    try:
+        run_with_spinner(
+            f"Installing {flavor} {version}",
+            instance.install_binary,
+            flavor,
+            version,
+            version_info,
+        )
+        instance.apply_server_files()
+        set_flash("[OK]", C.OK, f"Server '{sanitized}' created and installed.")
+        return sanitized
+    except Exception as exc:
+        logger.log("ERROR", f"Failed to download server: {exc}")
+        pause()
+        return sanitized
+
+
 def create_new_server(config_manager: ConfigManager, logger) -> None:
-    name = input(f"{C.BOLD}Enter a new server name: {C.RESET}").strip()
-    if not name:
+    raw_name = prompt(f"{C.BOLD}Enter a new server name: {C.RESET}")
+    if not raw_name:
         logger.log("ERROR", "Server name cannot be empty.")
         return
-    sanitized_name = sanitize_input(name)
+    sanitized_name = sanitize_input(raw_name)
     config = config_manager.load()
     if sanitized_name in config.get("servers", {}):
         logger.log("ERROR", f"Server '{sanitized_name}' already exists.")
@@ -803,9 +1163,9 @@ def select_current_server(
         if runtime:
             inst = runtime.get_instance(server_name)
             status_text = (
-                f"  [{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}]"
+                f"  [{C.OK}{C.DOT_ON} ONLINE{C.RESET}]"
                 if inst.is_running()
-                else f"  [{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}]"
+                else f"  [{C.ERR}{C.DOT_OFF} OFFLINE{C.RESET}]"
             )
 
         print(f" [{index:2d}] {C.BOLD}{server_name}{C.RESET}{status_text}")
@@ -813,9 +1173,9 @@ def select_current_server(
         print(f"      {C.DIM}Directory:{C.RESET} {server_dir}")
         print()
 
-    choice = input(
+    choice = prompt(
         f"{C.BOLD}Choose server [1-{len(servers)}] (or Enter to cancel): {C.RESET}"
-    ).strip()
+    )
     if not choice:
         return None
     if not choice.isdigit():
@@ -839,7 +1199,7 @@ def select_server_flavor() -> str | None:
     for index, flavor in enumerate(flavors, start=1):
         details = SERVER_FLAVORS[flavor]
         print(f" {index}. {details['name']} - {details['description']}")
-    choice = input(f"\n{C.BOLD}Choose flavor: {C.RESET}").strip()
+    choice = prompt(f"\n{C.BOLD}Choose flavor: {C.RESET}")
     if not choice.isdigit():
         return None
     selection = int(choice) - 1
@@ -877,7 +1237,7 @@ def select_server_version(flavor: str, logger) -> tuple[str | None, dict | None]
         print(
             "\n n = next page | p = previous page | s = toggle snapshots | 0 = cancel"
         )
-        choice = input(f"{C.BOLD}Choose version: {C.RESET}").strip().lower()
+        choice = prompt(f"{C.BOLD}Choose version: {C.RESET}").lower()
         if choice == "0":
             return None, None
         if choice == "n":
@@ -960,19 +1320,17 @@ def configure_server(
         eula_path = instance.server_dir / EULA_FILE
         eula_val = load_properties(eula_path).get("eula", "false").lower() == "true"
         eula_display = (
-            f"{C.GREEN}Accepted{C.RESET}"
-            if eula_val
-            else f"{C.RED}Not Accepted{C.RESET}"
+            f"{C.OK}Accepted{C.RESET}" if eula_val else f"{C.ERR}Not Accepted{C.RESET}"
         )
         online_val = str(settings.get("online-mode", "true")).lower() == "true"
         online_display = (
-            f"{C.GREEN}True{C.RESET} (Online)"
+            f"{C.OK}True{C.RESET} (Online)"
             if online_val
-            else f"{C.YELLOW}False{C.RESET} (Offline/Cracked)"
+            else f"{C.WARN}False{C.RESET} (Offline/Cracked)"
         )
         rcon_val = rcon.get("enabled", False)
         rcon_display = (
-            f"{C.GREEN}Enabled{C.RESET}" if rcon_val else f"{C.DIM}Disabled{C.RESET}"
+            f"{C.OK}Enabled{C.RESET}" if rcon_val else f"{C.DIM}Disabled{C.RESET}"
         )
 
         print_header(current_server, runtime)
@@ -991,19 +1349,19 @@ def configure_server(
         print(" [10] Edit Raw Config Files (server.properties / eula.txt)")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose setting [0-10]: {C.RESET}").strip()
+        choice = prompt(f"\n{C.BOLD}Choose setting [0-10]: {C.RESET}")
         if choice == "0":
             return
         try:
             if choice == "1":
-                value = int(input("RAM in MB: ").strip())
+                value = int(prompt("RAM in MB: "))
 
                 def update_ram(saved_config: dict) -> None:
                     saved_config["servers"][current_server]["ram_mb"] = value
 
                 updater = update_ram
             elif choice == "2":
-                value = int(input("Server port: ").strip())
+                value = int(prompt("Server port: "))
                 if not 1 <= value <= 65535:
                     logger.log("ERROR", "Port must be between 1 and 65535.")
                     pause()
@@ -1016,7 +1374,7 @@ def configure_server(
 
                 updater = update_port
             elif choice == "3":
-                value = input("MOTD: ").strip()
+                value = prompt("MOTD: ")
 
                 def update_motd(saved_config: dict) -> None:
                     saved_config["servers"][current_server]["server_settings"][
@@ -1025,7 +1383,7 @@ def configure_server(
 
                 updater = update_motd
             elif choice == "4":
-                value = int(input("Max players: ").strip())
+                value = int(prompt("Max players: "))
 
                 def update_max_players(saved_config: dict) -> None:
                     saved_config["servers"][current_server]["server_settings"][
@@ -1070,7 +1428,7 @@ def configure_server(
 
                 updater = update_rcon_toggle
             elif choice == "9":
-                value = input("RCON password: ").strip()
+                value = prompt("RCON password: ")
 
                 def update_rcon_password(saved_config: dict) -> None:
                     server = saved_config["servers"][current_server]
@@ -1122,7 +1480,7 @@ def edit_server_files(
         print(" 4. Toggle EULA")
         print(" 0. Back")
 
-        choice = input(f"\n{C.BOLD}Choose action: {C.RESET}").strip()
+        choice = prompt(f"\n{C.BOLD}Choose action: {C.RESET}")
         if choice == "0":
             return
         if choice == "1":
@@ -1134,19 +1492,19 @@ def edit_server_files(
             pause()
             continue
         if choice == "2":
-            key = input("Property key: ").strip()
+            key = prompt("Property key: ")
             if not key:
                 logger.log("ERROR", "Property key cannot be empty.")
                 pause()
                 continue
-            value = input("Property value: ").strip()
+            value = prompt("Property value: ")
             properties[key] = value
             instance.save_server_properties(properties)
             logger.log("SUCCESS", f"Updated {key} in {SERVER_PROPERTIES_FILE}.")
             pause()
             continue
         if choice == "3":
-            key = input("Property key to delete: ").strip()
+            key = prompt("Property key to delete: ")
             if key not in properties:
                 logger.log("ERROR", f"Property '{key}' does not exist.")
                 pause()
@@ -1172,7 +1530,7 @@ def choose_backup(instance, logger) -> Path | None:
         return None
     for index, backup in enumerate(backups, start=1):
         print(f" {index}. {backup.name} ({format_bytes(backup.stat().st_size)})")
-    choice = input(f"\n{C.BOLD}Choose backup: {C.RESET}").strip()
+    choice = prompt(f"\n{C.BOLD}Choose backup: {C.RESET}")
     if not choice.isdigit():
         logger.log("ERROR", "Backup selection must be numeric.")
         return None
@@ -1194,52 +1552,58 @@ def world_manager(
     instance = runtime.get_instance(current_server)
 
     while True:
+        clear_screen()
         config = config_manager.load()
         server_config = config["servers"][current_server]
         backup_cfg = server_config.get("backup_settings", {})
         backup_enabled = backup_cfg.get("enabled", False)
         backup_interval = backup_cfg.get("interval_hours", 6)
         sched_text = (
-            f"Every {backup_interval}h ({C.GREEN}Active{C.RESET})"
+            f"Every {backup_interval}h ({C.OK}Active{C.RESET})"
             if backup_enabled
             else f"{C.DIM}Disabled{C.RESET}"
         )
 
         backups = instance.list_backups()
-
-        print_header(current_server, runtime)
-        print(f" {C.BOLD}World & Backup Manager:{C.RESET} {current_server}\n")
+        width = get_terminal_width()
+        tag = f"MSM {C.BOX_H}{C.BOX_H} Backups: {current_server} "
+        pad = max(2, width - visible_len(tag))
+        print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
         print(f"  {C.DIM}Saved Backups :{C.RESET} {len(backups)}")
         print(f"  {C.DIM}Auto-Backup   :{C.RESET} {sched_text}")
-        print()
-        print(" [ 1] Create World Backup Now")
-        print(" [ 2] List All Backups")
-        print(" [ 3] Restore World from Backup")
-        print(" [ 4] Delete a Backup")
-        print(" [ 5] Configure Auto-Backup Schedule")
-        print(" [ 0] Back")
+        print(f"{C.DIM}{C.BOX_H * width}{C.RESET}")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-5]: {C.RESET}").strip()
-        if choice == "0":
+        flash = render_flash()
+        if flash:
+            print(flash, end="")
+
+        print(" [1] Create World Backup Now")
+        print(" [2] List All Backups")
+        print(" [3] Restore World from Backup")
+        print(" [4] Delete a Backup")
+        print(" [5] Configure Auto-Backup Schedule")
+        print(" [0] Back")
+
+        choice = prompt(f"\n{C.ACCENT}{C.POINTER}{C.RESET} ")
+        if choice in ("0", "b", "q", "back", "exit"):
             return
         if choice == "1":
             try:
                 backup_path = run_with_spinner(
                     "Creating backup", instance.create_backup
                 )
-                logger.log("SUCCESS", f"Backup saved to {backup_path}")
+                set_flash("[OK]", C.OK, f"Backup saved: {backup_path.name}")
             except Exception as exc:
-                logger.log("ERROR", f"Backup failed: {exc}")
-            pause()
+                set_flash("[ERR]", C.ERR, f"Backup failed: {exc}")
             continue
         if choice == "2":
             if not backups:
-                logger.log("INFO", "No backups are available.")
+                print("\nNo backups are available.")
             else:
                 print(f"\n{C.BOLD}Available Backups:{C.RESET}")
                 for backup in backups:
                     size_str = format_bytes(backup.stat().st_size)
-                    print(f"  {C.CYAN}•{C.RESET} {backup.name} ({size_str})")
+                    print(f"  {C.ACCENT}{C.BULLET}{C.RESET} {backup.name} ({size_str})")
             pause()
             continue
         if choice == "3":
@@ -1247,47 +1611,43 @@ def world_manager(
             if not backup_path:
                 pause()
                 continue
-            confirmation = input(
+            confirmation = prompt(
                 "This will overwrite world data. Type RESTORE to continue: "
-            ).strip()
+            )
             if confirmation != "RESTORE":
-                logger.log("INFO", "Restore cancelled.")
-                pause()
+                set_flash("[INFO]", C.CYAN, "Restore cancelled.")
                 continue
             try:
                 run_with_spinner(
                     "Restoring backup", instance.restore_backup, backup_path.name
                 )
+                set_flash("[OK]", C.OK, f"Restored backup: {backup_path.name}")
             except Exception as exc:
-                logger.log("ERROR", f"Restore failed: {exc}")
-            pause()
+                set_flash("[ERR]", C.ERR, f"Restore failed: {exc}")
             continue
         if choice == "4":
             backup_path = choose_backup(instance, logger)
             if not backup_path:
                 pause()
                 continue
-            confirmation = input(f"Type DELETE to remove {backup_path.name}: ").strip()
+            confirmation = prompt(f"Type DELETE to remove {backup_path.name}: ")
             if confirmation != "DELETE":
-                logger.log("INFO", "Deletion cancelled.")
-                pause()
+                set_flash("[INFO]", C.CYAN, "Deletion cancelled.")
                 continue
             try:
                 instance.delete_backup(backup_path.name)
+                set_flash("[OK]", C.OK, f"Deleted backup: {backup_path.name}")
             except Exception as exc:
-                logger.log("ERROR", f"Deletion failed: {exc}")
-            pause()
+                set_flash("[ERR]", C.ERR, f"Deletion failed: {exc}")
             continue
         if choice == "5":
-            prompt = (
+            prompt_str = (
                 f"Enable scheduled auto-backups? "
                 f"({'y/N' if backup_enabled else 'Y/n'}): "
             )
-            toggle = input(prompt).strip().lower()
+            toggle = prompt(prompt_str).lower()
             new_enabled = (toggle != "n") if not backup_enabled else (toggle == "y")
-            interval_raw = input(
-                f"Backup interval in hours [{backup_interval}]: "
-            ).strip()
+            interval_raw = prompt(f"Backup interval in hours [{backup_interval}]: ")
             try:
                 new_interval = float(interval_raw) if interval_raw else backup_interval
             except ValueError:
@@ -1299,11 +1659,8 @@ def world_manager(
                 b["interval_hours"] = new_interval
 
             config_manager.mutate(update_sched)
-            logger.log("SUCCESS", "Auto-backup schedule updated.")
-            pause()
+            set_flash("[OK]", C.OK, "Auto-backup schedule updated.")
             continue
-        logger.log("ERROR", "Invalid world manager selection.")
-        pause()
 
 
 def show_statistics(
@@ -1353,7 +1710,7 @@ def show_console(
         f"\n{C.CYAN}Attaching to {current_server} (screen: {instance.screen_name})...{C.RESET}"
     )
     print(
-        f"{C.YELLOW}TIP: To detach without stopping the server, press Ctrl+A then D.{C.RESET}"
+        f"{C.WARN}TIP: To detach without stopping the server, press Ctrl+A then D.{C.RESET}"
     )
     time.sleep(1.5)
     env = os.environ.copy()
@@ -1427,7 +1784,7 @@ def show_platform_diagnostics(
     print(f"\n  {C.BOLD}Storage & Paths:{C.RESET}")
     print(f"    Config Dir : {path_service.config_dir}")
     dbg_status = (
-        f"{C.GREEN}ENABLED (verbose){C.RESET}"
+        f"{C.OK}ENABLED (verbose){C.RESET}"
         if logger.is_debug_enabled()
         else f"{C.DIM}DISABLED (silent){C.RESET}"
     )
@@ -1438,11 +1795,11 @@ def show_platform_diagnostics(
     if caps.notes:
         print(f"\n  {C.BOLD}Diagnostic Notes:{C.RESET}")
         for note in caps.notes:
-            print(f"    • {note}")
+            print(f"    {C.BULLET} {note}")
 
     print("\n  [ t] Toggle Terminal DEBUG logs")
     print("  [Enter] Continue")
-    act = input(f"\n{C.BOLD}Action: {C.RESET}").strip().lower()
+    act = prompt(f"\n{C.BOLD}Action: {C.RESET}").lower()
     if act in ("t", "toggle"):
         new_state = logger.toggle_debug()
         new_text = "ENABLED" if new_state else "DISABLED (silent)"
@@ -1461,17 +1818,18 @@ def view_live_console(
     log_file = instance.server_dir / "logs" / "latest.log"
 
     while True:
-        print_header(current_server, runtime)
+        clear_screen()
+        width = get_terminal_width()
         is_running = instance.is_running()
         status_text = (
-            f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
+            f"{C.OK}{C.DOT_ON} ONLINE{C.RESET}"
             if is_running
-            else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
+            else f"{C.ERR}{C.DOT_OFF} OFFLINE{C.RESET}"
         )
-        print(
-            f" {C.BOLD}Live Console Viewer:{C.RESET} {current_server} [{status_text}]"
-        )
-        print(f" {C.DIM}Log path: {log_file}{C.RESET}\n")
+        tag = f"MSM {C.BOX_H}{C.BOX_H} Console: {current_server} [{status_text}] "
+        pad = max(2, width - visible_len(tag))
+        print(f"{C.ACCENT}{tag}{C.DIM}{C.BOX_H * pad}{C.RESET}")
+        print(f"{C.DIM}Log path: {log_file}{C.RESET}\n")
 
         lines: list[str] = []
         if log_file.exists():
@@ -1479,31 +1837,43 @@ def view_live_console(
                 raw_lines = log_file.read_text(
                     encoding="utf-8", errors="replace"
                 ).splitlines()
-                lines = raw_lines[-25:]
+                lines = raw_lines[-15:]
             except Exception as e:
                 lines = [f"[Error reading log: {e}]"]
         else:
             lines = ["[No log output generated yet]"]
 
-        width = min(get_terminal_width(), 100)
-        print(f"{C.PRIMARY}{'─' * width}{C.RESET}")
+        print(f"{C.DIM}{'─' * width}{C.RESET}")
         for line in lines:
             if "ERROR" in line or "Exception" in line:
-                print(f"{C.RED}{line}{C.RESET}")
+                print(f"{C.ERR}{line}{C.RESET}")
             elif "WARN" in line:
-                print(f"{C.YELLOW}{line}{C.RESET}")
+                print(f"{C.WARN}{line}{C.RESET}")
             elif "INFO" in line:
                 print(f"{C.CYAN}{line[:11]}{C.RESET}{line[11:]}")
             else:
                 print(f"{C.DIM}{line}{C.RESET}")
-        print(f"{C.PRIMARY}{'─' * width}{C.RESET}\n")
+        print(f"{C.DIM}{'─' * width}{C.RESET}\n")
 
-        print(" [Enter] Refresh logs   [s] Send command   [a] Attach screen   [0] Back")
-        action = input(f"\n{C.BOLD}Action: {C.RESET}").strip().lower()
-        if action in ("0", "b", "q"):
+        flash = render_flash()
+        if flash:
+            print(flash, end="")
+
+        print(" [Enter] Refresh   [s] Send cmd   [a] Attach screen   [0] Back")
+        action = prompt(f"\n{C.ACCENT}{C.POINTER}{C.RESET} ").lower()
+        if action in ("0", "b", "q", "back"):
             return
         elif action == "s":
-            send_command_menu(runtime, config_manager, logger)
+            cmd = prompt("Command: ")
+            if cmd:
+                if not instance.is_running():
+                    set_flash("[ERR]", C.ERR, "Server is not running.")
+                else:
+                    success = instance.send_command(cmd)
+                    if success:
+                        set_flash("[OK]", C.OK, f"Sent: {cmd}")
+                    else:
+                        set_flash("[ERR]", C.ERR, "Delivery failed.")
         elif action == "a":
             show_console(runtime, config_manager, logger)
 
@@ -1524,8 +1894,7 @@ def send_command_menu(
     print_header(current_server, runtime)
     print(f" {C.BOLD}Send command to {current_server}:{C.RESET}")
     print(" (e.g. 'help', 'list', 'op <player>', 'time set day')")
-    print(" (Leave blank and press Enter to return)")
-    command = input("\n> ").strip()
+    command = prompt("\n> ")
     if not command:
         return
     success = instance.send_command(command)
@@ -1552,40 +1921,7 @@ def send_command_menu(
 def server_console_menu(
     runtime: RuntimeManager, config_manager: ConfigManager, logger
 ) -> None:
-    config = ensure_current_server(config_manager)
-    current_server = config.get("current_server")
-    if not current_server:
-        return
-    instance = runtime.get_instance(current_server)
-
-    while True:
-        print_header(current_server, runtime)
-        is_running = instance.is_running()
-        status_text = (
-            f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
-            if is_running
-            else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
-        )
-        print(
-            f" {C.BOLD}Server Console & Logs:{C.RESET} {current_server} [{status_text}]\n"
-        )
-        print(" [ 1] View Live Console Logs (Mobile-friendly tail)")
-        print(" [ 2] Send Single Command to Server")
-        print(" [ 3] Attach to Interactive Screen Terminal")
-        print(" [ 0] Back")
-
-        choice = input(f"\n{C.BOLD}Choose action [0-3]: {C.RESET}").strip()
-        if choice == "0":
-            return
-        if choice == "1":
-            view_live_console(runtime, config_manager, logger)
-        elif choice == "2":
-            send_command_menu(runtime, config_manager, logger)
-        elif choice == "3":
-            show_console(runtime, config_manager, logger)
-        else:
-            logger.log("ERROR", "Invalid choice.")
-            pause()
+    view_live_console(runtime, config_manager, logger)
 
 
 def server_management_menu(
@@ -1601,15 +1937,14 @@ def server_management_menu(
         print(" [ 3] Platform & Capability Diagnostics")
         print(" [ 0] Back")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-3]: {C.RESET}").strip()
+        choice = prompt(f"\n{C.BOLD}Choose action [0-3]: {C.RESET}")
         if choice == "0":
             return
         if choice == "1":
             select_current_server(config_manager, logger, runtime=runtime)
             pause()
         elif choice == "2":
-            create_new_server(config_manager, logger)
-            pause()
+            server_creation_wizard(runtime, config_manager, logger)
         elif choice == "3":
             show_platform_diagnostics(runtime, config_manager, logger)
         else:
@@ -1620,8 +1955,7 @@ def server_management_menu(
 def startup_server_picker(
     runtime: RuntimeManager, config_manager: ConfigManager, logger
 ) -> str | None:
-    """Prompt the user on startup to select a server from the configured servers list,
-    displaying full directory paths and runtime statuses."""
+    """Prompt the user on startup to select a server, displaying paths and live status."""
     from platforms.paths import get_path_service
 
     path_service = get_path_service()
@@ -1632,8 +1966,7 @@ def startup_server_picker(
         if not servers:
             print_header(None, runtime)
             logger.log("INFO", "No servers found. Create one to begin.")
-            create_new_server(config_manager, logger)
-            pause()
+            server_creation_wizard(runtime, config_manager, logger)
             continue
 
         print_header(None, runtime)
@@ -1649,9 +1982,9 @@ def startup_server_picker(
             server_dir = path_service.resolve_server_dir(server_name, config)
             inst = runtime.get_instance(server_name)
             status = (
-                f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
+                f"{C.OK}{C.DOT_ON} ONLINE{C.RESET}"
                 if inst.is_running()
-                else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
+                else f"{C.ERR}{C.DOT_OFF} OFFLINE{C.RESET}"
             )
 
             print(f" [{index:2d}] {C.BOLD}{server_name}{C.RESET}  [{status}]")
@@ -1659,19 +1992,18 @@ def startup_server_picker(
             print(f"      {C.DIM}Directory:{C.RESET} {server_dir}")
             print()
 
-        print(f" {C.PRIMARY}── Actions ───────────────────────────────────{C.RESET}")
+        print(f" {C.DIM}── Actions ───────────────────────────────────{C.RESET}")
         print(" [ +] Create New Server")
         print(" [ d] Platform & System Diagnostics")
         print(" [ 0] Exit")
 
-        choice = input(
+        choice = prompt(
             f"\n{C.BOLD}Choose server [1-{len(servers)}] or action: {C.RESET}"
-        ).strip()
+        )
         if choice in ("0", "q", "exit"):
             return None
-        elif choice in ("+", "c", "new"):
-            create_new_server(config_manager, logger)
-            pause()
+        elif choice in ("+", "c", "new", "n"):
+            server_creation_wizard(runtime, config_manager, logger)
             continue
         elif choice.lower() == "d":
             show_platform_diagnostics(runtime, config_manager, logger)
@@ -1706,16 +2038,13 @@ def main() -> None:
     if not check_base_dependencies(logger):
         raise SystemExit(1)
 
-    # Initial server selection on start
     selected = startup_server_picker(runtime, config_manager, logger)
     if not selected:
         if runtime.running_servers():
-            leave_running = (
-                input("Leave running servers active in background after exit? (Y/n): ")
-                .strip()
-                .lower()
-            )
-            if leave_running == "n":
+            leave = prompt(
+                "Leave running servers active in background? (Y/n): ", default="y"
+            ).lower()
+            if leave == "n":
                 for s_name in runtime.running_servers():
                     runtime.get_instance(s_name).stop()
         raise SystemExit(0)
@@ -1730,87 +2059,154 @@ def main() -> None:
             continue
 
         instance = runtime.get_instance(current_server)
-        server_config = config["servers"][current_server]
-        flavor = server_config.get("server_flavor")
-        flavor_name = SERVER_FLAVORS.get(flavor, {}).get("name", "Not installed")
-        version = server_config.get("server_version") or "N/A"
-        status = (
-            f"{C.GREEN}{C.DOT_ON} ONLINE{C.RESET}"
-            if instance.is_running()
-            else f"{C.RED}{C.DOT_OFF} OFFLINE{C.RESET}"
-        )
+        is_running = instance.is_running()
+        width = get_terminal_width()
 
-        print_header(current_server, runtime)
-        print(f" {C.BOLD}{current_server}{C.RESET}  [{status}]")
-        print(f" {C.DIM}{flavor_name} {version}{C.RESET}")
-        print(f" {C.DIM}Directory: {instance.server_dir}{C.RESET}")
-        print()
-        print_connection_summary(instance)
-        print()
+        clear_screen()
+        render_server_hud(current_server, runtime, config_manager)
 
-        print(f" {C.PRIMARY}── Controls ──────────────────────────────────{C.RESET}")
-        print(" [ 1] Start server")
-        print(" [ 2] Stop server")
-        print(" [ 3] Server console (Live console / Send command)")
-        print()
-        print(f" {C.PRIMARY}── Configuration & Access ────────────────────{C.RESET}")
-        print(" [ 4] Server settings (RAM, Port, MOTD, EULA, Properties)")
-        print(" [ 5] Public tunnel (Playit.gg & Ngrok manager)")
-        print(" [ 6] World & backups (Backup, Restore, Schedule)")
-        print()
-        print(f" {C.PRIMARY}── Management ────────────────────────────────{C.RESET}")
-        print(" [ 7] Install / update server flavor & version")
-        print(" [ 8] Switch / create server")
-        print(" [ 9] Statistics & Performance")
-        print(" [10] Platform & System Diagnostics")
-        print(" [ 0] Switch Server / Exit")
+        flash = render_flash()
+        if flash:
+            print(flash, end="")
 
-        choice = input(f"\n{C.BOLD}Choose action [0-10]: {C.RESET}").strip()
+        divider = f"{C.DIM}{C.BOX_H * width}{C.RESET}"
+        lbl_1 = "[1] Stop  " if is_running else "[1] Start "
+        print(f"\n{C.DIM}── Controls ──────────────────────────────────{C.RESET}")
+        print(f" {C.ACCENT}{lbl_1}{C.RESET} [2] Console   [3] Restart   [4] Kill")
+        print(f"{C.DIM}── Config & Access ───────────────────────────{C.RESET}")
+        print(" [5] Tunnels   [6] Properties   [7] Backups")
+        print(f"{C.DIM}── Workspace ─────────────────────────────────{C.RESET}")
+        print(" [s] Switch    [n] New       [d] Delete    [q] Quit")
+        print(divider)
+
+        raw_cmd = prompt(f"{C.ACCENT}{C.POINTER}{C.RESET} ").strip()
+        if not raw_cmd:
+            continue
+
+        parts = raw_cmd.split(maxsplit=1)
+        action_name = parts[0].lower()
+        arg_val = parts[1].strip() if len(parts) > 1 else ""
+
         try:
-            if choice == "1":
+            if action_name in ("1", "start", "stop"):
+                if is_running:
+                    instance.stop()
+                    set_flash("[OK]", C.OK, f"Stopped {current_server}.")
+                else:
+                    started = instance.start()
+                    if started:
+                        set_flash(
+                            "[OK]",
+                            C.OK,
+                            f"Started {current_server} (PID {instance.current_pid()}).",
+                        )
+                    else:
+                        set_flash("[ERR]", C.ERR, "Server start failed.")
+            elif action_name in ("2", "console", "log", "logs"):
+                view_live_console(runtime, config_manager, logger)
+            elif action_name in ("3", "restart"):
+                instance.stop()
                 started = instance.start()
                 if started:
-                    instance.print_connection_details()
-                pause()
-            elif choice == "2":
-                force = input("Force stop? (y/N): ").strip().lower() == "y"
-                instance.stop(force=force)
-                pause()
-            elif choice == "3":
-                server_console_menu(runtime, config_manager, logger)
-            elif choice == "4":
-                configure_server(runtime, config_manager, logger)
-            elif choice == "5":
+                    set_flash("[OK]", C.OK, f"Restarted {current_server}.")
+                else:
+                    set_flash("[ERR]", C.ERR, "Restart failed.")
+            elif action_name in ("4", "kill"):
+                instance.stop(force=True)
+                set_flash("[WARN]", C.WARN, f"Force-killed {current_server}.")
+            elif action_name in ("5", "tunnel", "tunnels"):
                 tunnel_manager_menu(runtime, config_manager, current_server, logger)
-            elif choice == "6":
+            elif action_name in ("6", "prop", "props", "properties"):
+                quick_property_editor(instance, config_manager, current_server, logger)
+            elif action_name in ("7", "backup", "backups"):
                 world_manager(runtime, config_manager, logger)
-            elif choice == "7":
-                install_server(runtime, config_manager, logger)
+            elif action_name in ("s", "switch"):
+                select_current_server(config_manager, logger, runtime=runtime)
+            elif action_name in ("n", "new"):
+                created = server_creation_wizard(runtime, config_manager, logger)
+                if created:
+                    cfg = config_manager.load()
+                    cfg["current_server"] = created
+                    config_manager.save(cfg)
+            elif action_name in ("d", "delete"):
+                confirmation = prompt(
+                    f"Type DELETE to permanently remove '{current_server}': "
+                )
+                if confirmation == "DELETE":
+                    if instance.is_running():
+                        instance.stop(force=True)
+                    shutil.rmtree(instance.server_dir, ignore_errors=True)
+
+                    def remove_srv(s: dict) -> None:
+                        s.get("servers", {}).pop(current_server, None)
+                        if s.get("current_server") == current_server:
+                            s["current_server"] = None
+
+                    config_manager.mutate(remove_srv)
+                    set_flash("[OK]", C.OK, f"Deleted server '{current_server}'.")
+            elif action_name in ("q", "0", "quit", "exit"):
+                if runtime.running_servers():
+                    leave = prompt(
+                        "Leave running servers active in background? (Y/n): ",
+                        default="y",
+                    ).lower()
+                    if leave == "n":
+                        for s_name in runtime.running_servers():
+                            runtime.get_instance(s_name).stop()
+                raise SystemExit(0)
+            elif action_name in ("cmd", "rcon"):
+                if not arg_val:
+                    set_flash("[WARN]", C.WARN, "Usage: cmd <command>")
+                elif not instance.is_running():
+                    set_flash("[ERR]", C.ERR, "Server is not running.")
+                else:
+                    success = instance.send_command(arg_val)
+                    if success:
+                        set_flash("[OK]", C.OK, f"Sent: {arg_val}")
+                    else:
+                        set_flash("[ERR]", C.ERR, "Command delivery failed.")
+            elif action_name == "set":
+                if "=" in arg_val:
+                    k, v = arg_val.split("=", 1)
+                    k, v = k.strip(), v.strip()
+                    props_path = instance.server_dir / SERVER_PROPERTIES_FILE
+                    props = load_properties(props_path)
+                    props[k] = v
+                    instance.save_server_properties(props)
+                    set_flash("[OK]", C.OK, f"Set {k}={v}")
+                else:
+                    set_flash("[WARN]", C.WARN, "Usage: set key=val")
+            elif action_name == "use":
+                cfg = config_manager.load()
+                all_servers = list(cfg.get("servers", {}))
+                target = arg_val
+                if target.isdigit():
+                    idx = int(target) - 1
+                    if 0 <= idx < len(all_servers):
+                        target = all_servers[idx]
+                if target in all_servers:
+                    cfg["current_server"] = target
+                    config_manager.save(cfg)
+                    set_flash("[OK]", C.OK, f"Active server set to '{target}'.")
+                else:
+                    set_flash("[ERR]", C.ERR, f"Server '{target}' not found.")
+            elif action_name == "help":
+                clear_screen()
+                print(f"{C.BOLD}Available Commands & Shortcuts:{C.RESET}\n")
+                print("  start / stop   : Toggle active server state")
+                print("  restart / kill : Restart or force-terminate server")
+                print("  cmd <command>  : Send command via console or RCON")
+                print("  set <key>=<val>: Update property in server.properties")
+                print("  use <name>     : Switch active server context")
+                print("  5 (tunnels)    : Manage Playit / Ngrok remote tunnels")
+                print("  6 (properties) : Quick property editor")
+                print("  7 (backups)    : World backup and restore manager")
+                print("  s (switch)     : Interactive server selector")
+                print("  n (new)        : Server creation wizard")
+                print("  d (delete)     : Delete active server")
                 pause()
-            elif choice == "8":
-                server_management_menu(runtime, config_manager, logger)
-            elif choice == "9":
-                show_statistics(runtime, config_manager, db_manager)
-            elif choice == "10" or choice.lower() == "d":
-                show_platform_diagnostics(runtime, config_manager, logger)
-            elif choice == "0":
-                selected = startup_server_picker(runtime, config_manager, logger)
-                if not selected:
-                    if runtime.running_servers():
-                        leave_running = (
-                            input(
-                                "Leave running servers active in background after exit? (Y/n): "
-                            )
-                            .strip()
-                            .lower()
-                        )
-                        if leave_running == "n":
-                            for server_name in runtime.running_servers():
-                                runtime.get_instance(server_name).stop()
-                    raise SystemExit(0)
             else:
-                logger.log("ERROR", "Invalid menu selection.")
-                pause()
+                set_flash("[ERR]", C.ERR, f"Unknown command: '{raw_cmd}'. Type 'help'.")
         except KeyboardInterrupt as exc:
             raise SystemExit(0) from exc
         except Exception as exc:

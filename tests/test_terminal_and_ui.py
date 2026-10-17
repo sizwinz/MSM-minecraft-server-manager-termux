@@ -297,3 +297,79 @@ def test_debug_logging_silenced_by_default_and_toggleable(tmp_path: Path, capsys
     new_state = logger.toggle_debug()
     assert new_state is False
     assert logger.is_debug_enabled() is False
+
+
+def test_visible_len_strips_ansi():
+    from ui.colors import visible_len
+
+    raw = "\033[38;5;208m›\033[0m [1] Start / Stop"
+    assert visible_len(raw) == len("› [1] Start / Stop")
+    plain = "Clean ASCII string"
+    assert visible_len(plain) == len(plain)
+
+
+def test_colors_palette_and_geometric_glyphs():
+    from ui.colors import ColorScheme
+
+    scheme = ColorScheme()
+    assert "\033[38;5;208m" in scheme.ACCENT
+    assert "\033[97m" in scheme.FG
+    assert "\033[90m" in scheme.DIM
+    assert "\033[38;5;78m" in scheme.OK
+    assert "\033[38;5;214m" in scheme.WARN
+    assert "\033[38;5;203m" in scheme.ERR
+
+    assert scheme.DOT_ON == "●"
+    assert scheme.DOT_OFF == "○"
+    assert scheme.POINTER == "›"
+    assert scheme.SQUARE == "▪"
+    assert scheme.TREE_BRANCH == "├─"
+    assert scheme.TREE_CORNER == "└─"
+
+
+def test_prompt_safe_eof_and_interrupt(monkeypatch: pytest.MonkeyPatch):
+    from ui.cli import prompt
+
+    def raise_eof(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    assert prompt("test: ", default="default_val") == ""
+
+    def raise_sigint(_prompt=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", raise_sigint)
+    assert prompt("test: ", default="fallback") == ""
+
+
+def test_render_server_hud(tmp_path: Path, capsys):
+    from unittest.mock import MagicMock
+    from core.config import ConfigManager
+    from ui.cli import render_server_hud
+
+    config_file = tmp_path / "config.json"
+    logger = EnhancedLogger(tmp_path / "msm.log")
+    cfg = ConfigManager(config_file, logger)
+    cfg.ensure_server("hud_test")
+
+    instance = MagicMock()
+    instance.is_running.return_value = True
+    instance.current_pid.return_value = 4912
+    instance.get_server_port.return_value = 25565
+    instance.get_connection_info.return_value = {
+        "tunnel_provider": "playit",
+        "tunnel_url": "test-endpoint.ply.gg",
+        "tunnel_enabled": True,
+        "tunnel_status": "ready",
+    }
+    runtime = MagicMock()
+    runtime.get_instance.return_value = instance
+
+    render_server_hud("hud_test", runtime, cfg)
+    out = capsys.readouterr().out
+    assert "hud_test" in out
+    assert "ONLINE" in out
+    assert "4912" in out
+    assert "25565" in out
+    assert "test-endpoint.ply.gg" in out
