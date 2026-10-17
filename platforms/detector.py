@@ -98,6 +98,34 @@ def detect_package_manager(os_type: OSType, is_termux_env: bool) -> str | None:
     return None
 
 
+def enable_windows_ansi() -> bool:
+    """Enable VT100 virtual terminal processing in Windows console."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        h_out = kernel32.GetStdHandle(-11)
+        if h_out in (-1, 0, None):
+            os.system("")
+            return True
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(h_out, ctypes.byref(mode)):
+            os.system("")
+            return True
+        enable_vt = 0x0004
+        kernel32.SetConsoleMode(h_out, mode.value | enable_vt)
+        return True
+    except Exception:
+        try:
+            os.system("")
+            return True
+        except Exception:
+            return False
+
+
 def detect_terminal_capabilities() -> tuple[bool, bool, bool, int]:
     """Detect interactive TTY, ANSI color support, Unicode glyph support, and terminal width."""
     interactive = sys.stdout.isatty() if hasattr(sys.stdout, "isatty") else False
@@ -109,6 +137,7 @@ def detect_terminal_capabilities() -> tuple[bool, bool, bool, int]:
     if no_color or term == "dumb":
         ansi_colors = False
     elif sys.platform == "win32":
+        enable_windows_ansi()
         # Windows Terminal, ConEmu, ANSICON or Win10+ console supports VT100
         ansi_colors = bool(
             os.environ.get("WT_SESSION")
