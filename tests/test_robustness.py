@@ -6,9 +6,10 @@ from pathlib import Path
 import subprocess
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import zipfile
 
+import psutil
 import pytest
 
 from core.config import ConfigManager
@@ -216,6 +217,31 @@ def test_owned_tunnel_can_be_stopped_and_pid_recycling_is_rejected(tmp_path):
         assert child.poll() is None
         assert stop_tunnel_process(tmp_path, child)
         assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+
+
+def test_record_tunnel_handles_transient_empty_cmdline_during_spawn(tmp_path):
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path
+    )
+    try:
+        calls = []
+        real_cmdline = psutil.Process.cmdline
+
+        def transient_cmdline(self):
+            if not calls:
+                calls.append(1)
+                return []
+            return real_cmdline(self)
+
+        with patch.object(psutil.Process, "cmdline", transient_cmdline):
+            record_tunnel(tmp_path, "ngrok", child)
+            state = tunnel_state(tmp_path, "ngrok")
+            assert state is not None
+            assert state["pid"] == child.pid
     finally:
         if child.poll() is None:
             child.kill()

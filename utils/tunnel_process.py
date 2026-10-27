@@ -7,17 +7,72 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 
 import psutil
 
 from core.constants import TUNNEL_PID_FILE_NAME
 
 
-def _start_ticks(pid: int) -> str | None:
+def _start_ticks(pid: int, retries: int = 3) -> str | None:
+    stat_file = Path(f"/proc/{pid}/stat")
+    for _ in range(retries):
+        try:
+            return stat_file.read_text().rsplit(")", 1)[1].split()[19]
+        except (OSError, IndexError):
+            if not Path("/proc").is_dir():
+                return None
+            time.sleep(0.01)
+    return None
+
+
+def _get_proc_cmdline(
+    proc: psutil.Process, process=None, timeout: float = 0.5
+) -> list[str]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() <= deadline:
+        try:
+            cmdline = proc.cmdline()
+            if cmdline:
+                return cmdline
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            break
+        except (psutil.Error, OSError):
+            pass
+        time.sleep(0.01)
+
+    args = getattr(process, "args", None)
+    if args:
+        if isinstance(args, (list, tuple)):
+            return [str(arg) for arg in args]
+        if isinstance(args, str):
+            import shlex
+
+            try:
+                return shlex.split(args)
+            except ValueError:
+                return [args]
+        if isinstance(args, (bytes, os.PathLike)):
+            return [str(args)]
+
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-    except (OSError, IndexError):
-        return None
+        return proc.cmdline()
+    except (psutil.Error, OSError):
+        return []
+
+
+def _cmdlines_match(current: list[str], recorded: list[str]) -> bool:
+    if not current or not recorded:
+        return False
+    if current == recorded:
+        return True
+    if len(current) == len(recorded):
+        if current[1:] == recorded[1:]:
+            c_name = Path(current[0]).stem.lower()
+            r_name = Path(recorded[0]).stem.lower()
+            if c_name == r_name:
+                return True
+    return False
 
 
 def record_tunnel(server_dir: Path, provider: str, process, **details) -> dict:
@@ -31,7 +86,7 @@ def record_tunnel(server_dir: Path, provider: str, process, **details) -> dict:
         "provider": provider,
         "created": created,
         "start_ticks": _start_ticks(process.pid),
-        "cmdline": proc.cmdline(),
+        "cmdline": _get_proc_cmdline(proc, process),
         **details,
     }
     descriptor, name = tempfile.mkstemp(
@@ -68,15 +123,26 @@ def tunnel_state(server_dir: Path, provider: str | None = None) -> dict | None:
         ):
             return None
         if state.get("start_ticks"):
-            if _start_ticks(pid) != state["start_ticks"]:
+            current_ticks = _start_ticks(pid)
+            if current_ticks is not None and current_ticks != state["start_ticks"]:
                 return None
+            if current_ticks is None:
+                if state.get("created") is not None:
+                    if abs(proc.create_time() - state["created"]) > 0.1:
+                        return None
+                else:
+                    return None
         elif state.get("created") is not None:
             if abs(proc.create_time() - state["created"]) > 0.1:
                 return None
         else:
             # Never trust a bare PID when the OS cannot establish its identity.
             return None
-        if not state.get("cmdline") or proc.cmdline() != state["cmdline"]:
+        recorded_cmd = state.get("cmdline")
+        if not recorded_cmd or not isinstance(recorded_cmd, list):
+            return None
+        current_cmd = _get_proc_cmdline(proc, timeout=0.2)
+        if not _cmdlines_match(current_cmd, recorded_cmd):
             return None
         return state
     except (OSError, ValueError, KeyError, TypeError, psutil.Error):
